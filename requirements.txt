@@ -1,0 +1,18 @@
+# Runtime deps — pinned to known-good versions for reproducible builds.
+# (youtube-transcript-api changed its API between 0.x and 1.x, so an unpinned
+#  install can silently break transcript fetching. Bump deliberately, then test.)
+playwright==1.58.0
+youtube-transcript-api==1.2.4
+requests==2.33.1
+pyperclip==1.11.0
+aiohttp==3.13.5
+pywebview==6.2.1
+# Optional: Windows toast popups on queue completion / failure. The app works
+# without it (falls back to a sound + in-app banner), but installing it adds the
+# native notification. Pure-python, bundles fine with the .exe.
+winotify==1.1.0
+
+# Build tooling (not needed at runtime, only to produce the .exe)
+pyinstaller==6.19.0
+nuitka==4.0.8
+ordered-set==4.1.0

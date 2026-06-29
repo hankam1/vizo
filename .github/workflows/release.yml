@@ -1,0 +1,103 @@
+name: Build & Release
+
+# Triggers on a version tag (e.g. v1.2.0). Builds Windows (Nuitka) and macOS
+# (PyInstaller, best-effort/unsigned) and publishes them to a GitHub Release.
+#
+# To ship an update:
+#   1) bump VERSION in config.py
+#   2) git commit + push
+#   3) git tag v1.2.0 && git push origin v1.2.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:        # manual "build only" (no release) for testing
+
+permissions:
+  contents: write
+
+jobs:
+  # ----------------------------------------------------------------
+  # Windows — Nuitka onefile (matches the local build.bat; reliable).
+  # ----------------------------------------------------------------
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Build (Nuitka)
+        run: |
+          python -m nuitka `
+            --standalone --onefile --windows-console-mode=disable `
+            --disable-plugin=pywebview `
+            --include-package=webview --include-package=clr_loader `
+            --include-package=pythonnet --include-package=winotify `
+            --include-package-data=webview `
+            --no-deployment-flag=excluded-module-usage `
+            --include-data-dir=ui=ui --include-data-dir=prompts=prompts `
+            --windows-icon-from-ico=logo.ico `
+            --output-filename=vizo.exe --output-dir=build-nuitka `
+            --assume-yes-for-downloads `
+            --company-name=hankam1 --product-name=vizo `
+            app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vizo-windows
+          path: build-nuitka/vizo.exe
+
+  # ----------------------------------------------------------------
+  # macOS — PyInstaller .app (best-effort, UNSIGNED).
+  # Users will see a Gatekeeper warning until the app is notarized
+  # (needs an Apple Developer account). See README for the caveats.
+  # ----------------------------------------------------------------
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyobjc-framework-Cocoa pyobjc-framework-WebKit
+      - name: Build (PyInstaller)
+        run: |
+          pyinstaller --noconfirm --windowed --name vizo \
+            --add-data "ui:ui" --add-data "prompts:prompts" \
+            --collect-all playwright \
+            --hidden-import webview.platforms.cocoa \
+            app.py
+      - name: Zip .app
+        run: |
+          cd dist && ditto -c -k --sequesterRsrc --keepParent vizo.app ../vizo-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vizo-macos
+          path: vizo-macos.zip
+
+  # ----------------------------------------------------------------
+  # Publish both artifacts to the GitHub Release for the pushed tag.
+  # ----------------------------------------------------------------
+  release:
+    needs: [windows, macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/vizo-windows/vizo.exe
+            artifacts/vizo-macos/vizo-macos.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: false
