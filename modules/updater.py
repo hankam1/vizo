@@ -1,6 +1,8 @@
 import os
 import re
+import sys
 import time
+import shutil
 import subprocess
 import requests
 from config import VERSION, GITHUB_REPO, IS_FROZEN, INSTALL_EXE
@@ -22,12 +24,21 @@ def _version_tuple(v: str) -> tuple:
 
 
 def _pick_asset(assets: list) -> dict | None:
-    """Pick the release asset to install.
+    """Pick the release asset for THIS platform.
 
-    Layered preference: exact expected name → any non-debug .exe → any .exe.
-    A bare 'first .exe wins' rule could install vi.log-debug.exe if a debug
-    build is attached to the release before the main one.
+    macOS: the zipped .app (vizo-macos.zip). Windows: the .exe (exact expected
+    name → any non-debug .exe → any .exe; a bare 'first .exe wins' could install
+    a debug build attached before the main one).
     """
+    if sys.platform == "darwin":
+        zips = [a for a in assets if str(a.get("name", "")).lower().endswith(".zip")]
+        if not zips:
+            return None
+        for a in zips:
+            n = a["name"].lower()
+            if "mac" in n or "darwin" in n or "osx" in n:
+                return a
+        return zips[0]
     exes = [a for a in assets if str(a.get("name", "")).lower().endswith(".exe")]
     if not exes:
         return None
@@ -83,9 +94,17 @@ def _restart_env() -> dict:
 
 
 def download_and_apply(download_url: str) -> dict:
-    """Download new exe, rename current → .old, put new in place, restart."""
+    """Download the new build and apply it in place, then restart. Per-platform:
+    Windows swaps the single .exe; macOS replaces the .app bundle."""
     if not IS_FROZEN:
-        return {"ok": False, "error": "Обновление работает только в собранном exe"}
+        return {"ok": False, "error": "Обновление работает только в собранном приложении"}
+    if sys.platform == "darwin":
+        return _apply_macos(download_url)
+    return _apply_windows(download_url)
+
+
+def _apply_windows(download_url: str) -> dict:
+    """Download new exe, rename current → .old, put new in place, restart."""
     # INSTALL_EXE — путь к УСТАНОВЛЕННОМУ бинарнику. sys.executable в onefile
     # может указывать на распакованный во временную папку payload, замена
     # которого исчезает при выходе.
@@ -157,9 +176,90 @@ def download_and_apply(download_url: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def _macos_app_path() -> str | None:
+    """Path to the running .app bundle.
+
+    Under a PyInstaller --windowed build, sys.executable is
+    `…/vizo.app/Contents/MacOS/vizo`, so the bundle is three levels up."""
+    p = os.path.dirname(os.path.dirname(os.path.dirname(sys.executable)))
+    return p if p.endswith(".app") and os.path.isdir(p) else None
+
+
+def _apply_macos(download_url: str) -> dict:
+    """Download the macOS .zip, unpack the .app, strip the Gatekeeper quarantine
+    (so an UNSIGNED build isn't blocked on relaunch), replace the running bundle
+    in place, and relaunch with `open`."""
+    import zipfile
+    import tempfile
+
+    app_path = _macos_app_path()
+    if not app_path:
+        return {"ok": False, "error": "Не удалось определить путь к vizo.app"}
+    if not os.access(os.path.dirname(app_path), os.W_OK):
+        return {"ok": False, "error": "Нет прав на запись рядом с vizo.app — перенеси приложение в «Программы» и попробуй снова"}
+
+    tmpdir = tempfile.mkdtemp(prefix="vizo_update_")
+    try:
+        zip_path = os.path.join(tmpdir, "update.zip")
+        r = requests.get(download_url, stream=True, timeout=600)
+        r.raise_for_status()
+        expected = int(r.headers.get("Content-Length") or 0)
+        written = 0
+        with open(zip_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
+                    written += len(chunk)
+        if written < 1_000_000 or (expected and written != expected):
+            return {"ok": False, "error": f"Загрузка повреждена ({written} из {expected or '?'} байт)"}
+
+        extract_dir = os.path.join(tmpdir, "extracted")
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(extract_dir)
+        new_app = next((os.path.join(extract_dir, n) for n in os.listdir(extract_dir)
+                        if n.endswith(".app")), None)
+        if not new_app:
+            return {"ok": False, "error": "В архиве нет .app"}
+
+        # Без подписи свежескачанный .app помечается карантином и Gatekeeper
+        # блокирует запуск — снимаем атрибут, тогда блокировки нет.
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", new_app], check=False)
+        # zip может потерять бит исполняемости у бинарника — вернём его.
+        macos_dir = os.path.join(new_app, "Contents", "MacOS")
+        try:
+            for fn in os.listdir(macos_dir):
+                os.chmod(os.path.join(macos_dir, fn), 0o755)
+        except Exception:
+            pass
+
+        # Подменяем бандл: старый в сторону, новый на место. На Unix можно
+        # перемещать каталог работающего процесса — текущий exe продолжит жить.
+        old_app = app_path + ".old"
+        if os.path.exists(old_app):
+            shutil.rmtree(old_app, ignore_errors=True)
+        os.rename(app_path, old_app)
+        try:
+            shutil.move(new_app, app_path)
+        except Exception:
+            os.rename(old_app, app_path)  # откат
+            raise
+
+        subprocess.Popen(["open", app_path], env=_restart_env())
+        os._exit(0)
+    except Exception as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return {"ok": False, "error": str(e)}
+
+
 def cleanup_old_exe():
-    """Remove .old leftover from previous update. Call on app startup."""
+    """Remove the .old leftover from a previous update. Call on app startup."""
     if not IS_FROZEN:
+        return
+    if sys.platform == "darwin":
+        app_path = _macos_app_path()
+        old = (app_path + ".old") if app_path else None
+        if old and os.path.isdir(old):
+            shutil.rmtree(old, ignore_errors=True)
         return
     old_path = INSTALL_EXE + ".old"
     if os.path.exists(old_path):

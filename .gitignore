@@ -6,6 +6,12 @@
 user_settings.json
 # Claude login state
 claude_auth.json
+# Per-user runtime data (scenarios/voices/languages live in USER_DATA_DIR;
+# the default set comes from code _all_builtins(), so users don't need these).
+# To ship a scenario to everyone, add it to _all_builtins() in code instead.
+user_scenarios.json
+user_voices.json
+user_languages.json
 # Claude browser session (cookies / tokens)
 chrome_profile/
 # generated results

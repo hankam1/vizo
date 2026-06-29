@@ -70,9 +70,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyobjc-framework-Cocoa pyobjc-framework-WebKit
+      - name: Make .icns icon
+        run: |
+          mkdir -p vizo.iconset
+          sips -z 16 16   logo_1024.png --out vizo.iconset/icon_16x16.png
+          sips -z 32 32   logo_1024.png --out vizo.iconset/icon_16x16@2x.png
+          sips -z 32 32   logo_1024.png --out vizo.iconset/icon_32x32.png
+          sips -z 64 64   logo_1024.png --out vizo.iconset/icon_32x32@2x.png
+          sips -z 128 128 logo_1024.png --out vizo.iconset/icon_128x128.png
+          sips -z 256 256 logo_1024.png --out vizo.iconset/icon_128x128@2x.png
+          sips -z 256 256 logo_1024.png --out vizo.iconset/icon_256x256.png
+          sips -z 512 512 logo_1024.png --out vizo.iconset/icon_256x256@2x.png
+          sips -z 512 512 logo_1024.png --out vizo.iconset/icon_512x512.png
+          cp logo_1024.png vizo.iconset/icon_512x512@2x.png
+          iconutil -c icns vizo.iconset -o vizo.icns
       - name: Build (PyInstaller)
         run: |
           pyinstaller --noconfirm --windowed --name vizo \
+            --icon vizo.icns \
             --add-data "ui:ui" --add-data "prompts:prompts" \
             --collect-all playwright \
             --hidden-import webview.platforms.cocoa \

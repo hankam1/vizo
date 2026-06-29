@@ -15,9 +15,13 @@ if IS_FROZEN:
     # extracts next to __file__ (no _MEIPASS), so fall back to the module dir.
     RESOURCE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     # Per-user writable data — MUST live outside the temp extraction dir so it
-    # survives across launches.
-    APPDATA = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-    USER_DATA_DIR = os.path.join(APPDATA, "vi.log")
+    # survives across launches. Per-OS conventional location.
+    if sys.platform == "darwin":
+        USER_DATA_DIR = os.path.join(str(Path.home()), "Library", "Application Support", "vizo")
+    else:
+        # Windows: keep the legacy "vi.log" folder so existing installs keep their data.
+        APPDATA = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        USER_DATA_DIR = os.path.join(APPDATA, "vi.log")
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
