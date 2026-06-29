@@ -32,6 +32,8 @@ jobs:
           pip install -r requirements.txt
       - name: Build (Nuitka)
         run: |
+          $ver = (python -c "import config; print(config.VERSION)").Trim()
+          echo "Building vizo $ver"
           python -m nuitka `
             --standalone --onefile --windows-console-mode=disable `
             --disable-plugin=pywebview `
@@ -44,6 +46,7 @@ jobs:
             --output-filename=vizo.exe --output-dir=build-nuitka `
             --assume-yes-for-downloads `
             --company-name=hankam1 --product-name=vizo `
+            --product-version=$ver --file-version=$ver `
             app.py
       - uses: actions/upload-artifact@v4
         with:
