@@ -21,6 +21,12 @@ imported_assets/
 # design scratch downloads
 _design_dl/
 
+# internal docs / scratch — not for the public repo
+DESIGN_BRIEF.md
+DESIGN_BRIEF_SCENARIOS.md
+ui_prototype.html
+debug_dump_ui.py
+
 # ============================================================
 # Logs / debug / scratch
 # ============================================================
