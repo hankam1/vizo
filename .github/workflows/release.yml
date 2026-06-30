@@ -54,29 +54,36 @@ jobs:
           path: build-nuitka/vizo.exe
 
   # ----------------------------------------------------------------
-  # macOS — ONE universal2 .app (runs natively on Apple Silicon AND Intel),
-  # packaged as a drag-to-Applications .dmg (best-effort, UNSIGNED → first
-  # launch needs right-click→Open). Built on the arm64 runner with a
-  # universal2 python.org Python (no scarce Intel runner needed).
+  # macOS — two NATIVE dmgs, both built on the arm64 runner:
+  #   arm64  → native; x86_64 → via Rosetta (each leg installs its own
+  #   arch-native wheels, so no universal "fat binary" requirement that
+  #   thin-wheel deps like yarl break). No scarce Intel runner needed.
+  #   UNSIGNED → first launch needs right-click→Open.
   # ----------------------------------------------------------------
   macos:
     runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            label: apple-silicon
+          - arch: x86_64
+            label: intel
     steps:
       - uses: actions/checkout@v4
+      - name: Ensure Rosetta (x86_64 leg)
+        if: matrix.arch == 'x86_64'
+        run: softwareupdate --install-rosetta --agree-to-license || true
       - name: Install universal2 Python (python.org)
         run: |
           curl -fsSL -o python.pkg https://www.python.org/ftp/python/3.13.1/python-3.13.1-macos11.pkg
           sudo installer -pkg python.pkg -target /
-          echo "PY=/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13" >> "$GITHUB_ENV"
-      - name: Verify Python is universal2
+      - name: Install deps (${{ matrix.arch }})
         run: |
-          file "$(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -c 'import sys; print(sys.executable)')"
-          $PY -c "import platform; print('python', platform.python_version())"
-      - name: Install deps (universal2 wheels)
-        run: |
-          $PY -m pip install --upgrade pip
-          $PY -m pip install -r requirements.txt
-          $PY -m pip install pyobjc-framework-Cocoa pyobjc-framework-WebKit
+          PY=/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13
+          arch -${{ matrix.arch }} $PY -m pip install --upgrade pip
+          arch -${{ matrix.arch }} $PY -m pip install -r requirements.txt pyobjc-framework-Cocoa pyobjc-framework-WebKit
       - name: Make .icns icon
         run: |
           mkdir -p vizo.iconset
@@ -91,11 +98,12 @@ jobs:
           sips -z 512 512 logo_1024.png --out vizo.iconset/icon_512x512.png
           cp logo_1024.png vizo.iconset/icon_512x512@2x.png
           iconutil -c icns vizo.iconset -o vizo.icns
-      - name: Build (PyInstaller universal2)
+      - name: Build ${{ matrix.label }} (${{ matrix.arch }})
         run: |
-          $PY -m PyInstaller --noconfirm --windowed --name vizo \
+          PY=/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13
+          arch -${{ matrix.arch }} $PY -m PyInstaller --noconfirm --windowed --name vizo \
             --icon vizo.icns \
-            --target-arch universal2 \
+            --target-arch ${{ matrix.arch }} \
             --add-data "ui:ui" --add-data "prompts:prompts" \
             --collect-all playwright \
             --hidden-import webview.platforms.cocoa \
@@ -105,11 +113,12 @@ jobs:
           mkdir -p dmg_stage
           cp -R dist/vizo.app dmg_stage/
           ln -s /Applications dmg_stage/Applications
-          hdiutil create -volname "vizo" -srcfolder dmg_stage -ov -format UDZO vizo-mac.dmg
+          hdiutil create -volname "vizo" -srcfolder dmg_stage -ov -format UDZO \
+            "vizo-mac-${{ matrix.label }}.dmg"
       - uses: actions/upload-artifact@v4
         with:
-          name: vizo-mac
-          path: vizo-mac.dmg
+          name: vizo-mac-${{ matrix.label }}
+          path: vizo-mac-${{ matrix.label }}.dmg
 
   # ----------------------------------------------------------------
   # Publish all artifacts to the GitHub Release for the pushed tag.
@@ -127,6 +136,7 @@ jobs:
         with:
           files: |
             artifacts/vizo-windows/vizo.exe
-            artifacts/vizo-mac/vizo-mac.dmg
+            artifacts/vizo-mac-apple-silicon/vizo-mac-apple-silicon.dmg
+            artifacts/vizo-mac-intel/vizo-mac-intel.dmg
           generate_release_notes: true
           fail_on_unmatched_files: false
