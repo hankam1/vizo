@@ -54,12 +54,20 @@ jobs:
           path: build-nuitka/vizo.exe
 
   # ----------------------------------------------------------------
-  # macOS — PyInstaller .app (best-effort, UNSIGNED).
-  # Users will see a Gatekeeper warning until the app is notarized
-  # (needs an Apple Developer account). See README for the caveats.
+  # macOS — native PyInstaller .app per architecture, packaged as a .dmg
+  # (best-effort, UNSIGNED → first-launch Gatekeeper right-click→Open).
+  #   macos-14 = Apple Silicon (arm64), macos-13 = Intel (x86_64).
   # ----------------------------------------------------------------
   macos:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            label: apple-silicon
+          - runner: macos-13
+            label: intel
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -92,16 +100,20 @@ jobs:
             --collect-all playwright \
             --hidden-import webview.platforms.cocoa \
             app.py
-      - name: Zip .app
+      - name: Make .dmg (drag-to-Applications)
         run: |
-          cd dist && ditto -c -k --sequesterRsrc --keepParent vizo.app ../vizo-macos.zip
+          mkdir -p dmg_stage
+          cp -R dist/vizo.app dmg_stage/
+          ln -s /Applications dmg_stage/Applications
+          hdiutil create -volname "vizo" -srcfolder dmg_stage -ov -format UDZO \
+            "vizo-mac-${{ matrix.label }}.dmg"
       - uses: actions/upload-artifact@v4
         with:
-          name: vizo-macos
-          path: vizo-macos.zip
+          name: vizo-mac-${{ matrix.label }}
+          path: vizo-mac-${{ matrix.label }}.dmg
 
   # ----------------------------------------------------------------
-  # Publish both artifacts to the GitHub Release for the pushed tag.
+  # Publish all artifacts to the GitHub Release for the pushed tag.
   # ----------------------------------------------------------------
   release:
     needs: [windows, macos]
@@ -116,6 +128,7 @@ jobs:
         with:
           files: |
             artifacts/vizo-windows/vizo.exe
-            artifacts/vizo-macos/vizo-macos.zip
+            artifacts/vizo-mac-apple-silicon/vizo-mac-apple-silicon.dmg
+            artifacts/vizo-mac-intel/vizo-mac-intel.dmg
           generate_release_notes: true
           fail_on_unmatched_files: false

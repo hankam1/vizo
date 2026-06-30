@@ -31,14 +31,21 @@ def _pick_asset(assets: list) -> dict | None:
     a debug build attached before the main one).
     """
     if sys.platform == "darwin":
+        import platform
+        machine = platform.machine().lower()  # 'arm64' (Apple Silicon) | 'x86_64' (Intel)
+        is_arm = ("arm" in machine) or ("aarch64" in machine)
+        dmgs = [a for a in assets if str(a.get("name", "")).lower().endswith(".dmg")]
+        if dmgs:
+            for a in dmgs:
+                n = a["name"].lower()
+                if is_arm and ("arm64" in n or "silicon" in n or "aarch64" in n):
+                    return a
+                if (not is_arm) and ("intel" in n or "x86" in n or "x64" in n):
+                    return a
+            return dmgs[0]  # arch not in name — best effort
+        # Backward-compat: a zipped .app if no .dmg is attached.
         zips = [a for a in assets if str(a.get("name", "")).lower().endswith(".zip")]
-        if not zips:
-            return None
-        for a in zips:
-            n = a["name"].lower()
-            if "mac" in n or "darwin" in n or "osx" in n:
-                return a
-        return zips[0]
+        return zips[0] if zips else None
     exes = [a for a in assets if str(a.get("name", "")).lower().endswith(".exe")]
     if not exes:
         return None
@@ -185,10 +192,27 @@ def _macos_app_path() -> str | None:
     return p if p.endswith(".app") and os.path.isdir(p) else None
 
 
+def _extract_app_from_dmg(dmg_path: str, workdir: str) -> str | None:
+    """Mount the .dmg, copy the .app out, detach. Returns the copied .app path."""
+    mp = os.path.join(workdir, "mnt")
+    os.makedirs(mp, exist_ok=True)
+    subprocess.run(["hdiutil", "attach", dmg_path, "-nobrowse", "-readonly",
+                    "-mountpoint", mp], check=True)
+    try:
+        app = next((os.path.join(mp, n) for n in os.listdir(mp) if n.endswith(".app")), None)
+        if not app:
+            return None
+        dest = os.path.join(workdir, os.path.basename(app))
+        shutil.copytree(app, dest, symlinks=True)
+        return dest
+    finally:
+        subprocess.run(["hdiutil", "detach", mp, "-force"], check=False)
+
+
 def _apply_macos(download_url: str) -> dict:
-    """Download the macOS .zip, unpack the .app, strip the Gatekeeper quarantine
-    (so an UNSIGNED build isn't blocked on relaunch), replace the running bundle
-    in place, and relaunch with `open`."""
+    """Download the macOS build (.dmg, or legacy .zip), unpack the .app, strip
+    the Gatekeeper quarantine (so an UNSIGNED build isn't blocked on relaunch),
+    replace the running bundle in place, and relaunch with `open`."""
     import zipfile
     import tempfile
 
@@ -200,12 +224,13 @@ def _apply_macos(download_url: str) -> dict:
 
     tmpdir = tempfile.mkdtemp(prefix="vizo_update_")
     try:
-        zip_path = os.path.join(tmpdir, "update.zip")
+        is_dmg = download_url.lower().split("?")[0].endswith(".dmg")
+        dl_path = os.path.join(tmpdir, "update.dmg" if is_dmg else "update.zip")
         r = requests.get(download_url, stream=True, timeout=600)
         r.raise_for_status()
         expected = int(r.headers.get("Content-Length") or 0)
         written = 0
-        with open(zip_path, "wb") as f:
+        with open(dl_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
                 if chunk:
                     f.write(chunk)
@@ -213,13 +238,16 @@ def _apply_macos(download_url: str) -> dict:
         if written < 1_000_000 or (expected and written != expected):
             return {"ok": False, "error": f"Загрузка повреждена ({written} из {expected or '?'} байт)"}
 
-        extract_dir = os.path.join(tmpdir, "extracted")
-        with zipfile.ZipFile(zip_path) as z:
-            z.extractall(extract_dir)
-        new_app = next((os.path.join(extract_dir, n) for n in os.listdir(extract_dir)
-                        if n.endswith(".app")), None)
+        if is_dmg:
+            new_app = _extract_app_from_dmg(dl_path, tmpdir)
+        else:
+            extract_dir = os.path.join(tmpdir, "extracted")
+            with zipfile.ZipFile(dl_path) as z:
+                z.extractall(extract_dir)
+            new_app = next((os.path.join(extract_dir, n) for n in os.listdir(extract_dir)
+                            if n.endswith(".app")), None)
         if not new_app:
-            return {"ok": False, "error": "В архиве нет .app"}
+            return {"ok": False, "error": "Не нашёл .app в загруженном файле"}
 
         # Без подписи свежескачанный .app помечается карантином и Gatekeeper
         # блокирует запуск — снимаем атрибут, тогда блокировки нет.
