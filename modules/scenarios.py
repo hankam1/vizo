@@ -422,6 +422,45 @@ def _is_runtime_var(name: str) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# CHECKPOINTS (дозапуск с середины)
+# ─────────────────────────────────────────────────────────────────────────
+# После каждого выполненного батча раннер пишет в папку результата снимок
+# переменных + сколько батчей готово. «Продолжить с места» пропускает готовые
+# шаги — 20-минутная генерация в Claude и оплаченная озвучка не повторяются.
+CHECKPOINT_FILENAME = ".vizo_state.json"
+
+
+def steps_fingerprint(steps: list) -> str:
+    """Отпечаток структуры шагов. Если сценарий отредактировали после падения,
+    старый чекпоинт к нему уже не подходит — сравнение отпечатков это ловит."""
+    import hashlib
+    raw = json.dumps([(s.get("id"), s.get("type")) for s in (steps or [])])
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def load_checkpoint(output_dir: str, scenario: dict) -> Optional[dict]:
+    """Прочитать чекпоинт из папки результата. None — нет/битый/не от этого
+    сценария (структура шагов изменилась)."""
+    path = os.path.join(output_dir or "", CHECKPOINT_FILENAME)
+    try:
+        with open(path, encoding="utf-8") as f:
+            state = json.load(f)
+        if not isinstance(state, dict):
+            return None
+        if state.get("fingerprint") != steps_fingerprint(scenario.get("steps", [])):
+            log.warning("Чекпоинт не подходит: сценарий изменился после падения")
+            return None
+        if not isinstance(state.get("completed_batches"), int):
+            return None
+        return state
+    except FileNotFoundError:
+        return None
+    except Exception:
+        log.exception("Не смог прочитать чекпоинт %s", path)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # EXECUTION ENGINE
 # ─────────────────────────────────────────────────────────────────────────
 class ScenarioCancelled(Exception):
@@ -446,9 +485,13 @@ class ScenarioRunner:
                  on_ask_user: Optional[Callable] = None,
                  on_user_input: Optional[Callable] = None,
                  starting_vars: Optional[dict] = None,
-                 cancel_event=None):
+                 cancel_event=None,
+                 resume_state: Optional[dict] = None):
         self.scenario = scenario
         self.output_dir = output_dir
+        # Чекпоинт прошлого (упавшего/отменённого) запуска в этой же папке:
+        # {"completed_batches": N, "vars": {...}} — см. load_checkpoint().
+        self._resume_state = resume_state
         self.on_progress = on_progress or (lambda *a, **k: None)
         self.on_ask_user = on_ask_user
         self.on_user_input = on_user_input
@@ -509,10 +552,29 @@ class ScenarioRunner:
                 batches[-1].append((i, step))
             else:
                 batches.append([(i, step)])
+
+        # Дозапуск с середины: пропустить батчи, выполненные до падения,
+        # и восстановить накопленные переменные из чекпоинта.
+        start_batch = 0
+        if self._resume_state:
+            start_batch = self._resume_start_batch(batches)
+            for k, v in (self._resume_state.get("vars") or {}).items():
+                self.vars.setdefault(k, v)   # свежие starting_vars важнее
+            self.vars["output_dir"] = self.output_dir
+            skipped = sum(len(b) for b in batches[:start_batch])
+            if skipped:
+                log.info("Resume: пропускаю %d готовых шагов (%d батчей)",
+                         skipped, start_batch)
+                self.on_progress(batches[start_batch][0][0] if start_batch < len(batches) else total,
+                                 total, "Продолжаю с места падения",
+                                 f"{skipped} шагов уже готово")
+
         log.info("Scenario start: %d steps, output_dir=%s", total, self.output_dir)
         try:
-            done = 0
-            for batch in batches:
+            done = sum(len(b) for b in batches[:start_batch])
+            for batch_no, batch in enumerate(batches):
+                if batch_no < start_batch:
+                    continue
                 self._check_cancel()
                 if len(batch) == 1:
                     idx, step = batch[0]
@@ -539,6 +601,7 @@ class ScenarioRunner:
                         raise
                     log.info("Step %d/%d OK: type=%s", idx + 1, total, step.get("type"))
                     done += 1
+                    self._write_checkpoint(batch_no + 1)
                 else:
                     # Run all steps in batch concurrently
                     names = " + ".join(s.get("name") or s.get("type") for _, s in batch)
@@ -570,10 +633,70 @@ class ScenarioRunner:
                         raise
                     log.info("Parallel batch OK: %s", names)
                     done += len(batch)
+                    self._write_checkpoint(batch_no + 1)
         finally:
             await self._close_claude()
+        self._clear_checkpoint()  # успешный финиш — возобновлять нечего
         self.on_progress(total, total, "Готово")
         return self.vars
+
+    def _resume_start_batch(self, batches: list) -> int:
+        """С какого батча продолжать по чекпоинту.
+
+        Нюанс Claude: шаги claude_prompt/claude_ask/claude_chunked живут в
+        контексте чата, открытого шагом claude_open. Если первый невыполненный
+        claude-шаг опирается на чат, открытый ДО точки возобновления, — чат
+        мёртв (браузер закрыт при падении), и надо откатиться к его
+        claude_open и переиграть диалог. Дорогая часть (озвучка, картинки)
+        после диалога всё равно пропускается по чекпоинту."""
+        want = self._resume_state.get("completed_batches") or 0
+        start = max(0, min(int(want), len(batches)))
+        for b in batches[start:]:
+            for _, s in b:
+                t = s.get("type")
+                if t == "claude_open":
+                    return start  # дальше чат откроется заново сам
+                if t in ("claude_prompt", "claude_ask", "claude_chunked"):
+                    for bi in range(start - 1, -1, -1):
+                        if any(st.get("type") == "claude_open"
+                               for _, st in batches[bi]):
+                            log.info("Resume: откат с батча %d на %d — чат Claude "
+                                     "нужно переиграть", start, bi)
+                            return bi
+                    return 0
+        return start
+
+    def _write_checkpoint(self, completed_batches: int):
+        """Атомарно сохранить прогресс в папку результата. Ошибки глотаем:
+        чекпоинт — страховка, он не должен ронять здоровый запуск."""
+        try:
+            safe_vars = {}
+            for k, v in self.vars.items():
+                try:
+                    json.dumps(v)
+                    safe_vars[k] = v
+                except (TypeError, ValueError):
+                    continue
+            state = {
+                "scenario_id": self.scenario.get("id"),
+                "fingerprint": steps_fingerprint(self.scenario.get("steps", [])),
+                "completed_batches": completed_batches,
+                "vars": safe_vars,
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            path = os.path.join(self.output_dir, CHECKPOINT_FILENAME)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception:
+            log.exception("Не смог записать чекпоинт")
+
+    def _clear_checkpoint(self):
+        try:
+            os.remove(os.path.join(self.output_dir, CHECKPOINT_FILENAME))
+        except OSError:
+            pass
 
     async def _run_step_skippable(self, idx: int, step: dict):
         """_run_step, но StepSkipped гасится здесь же: используется в
@@ -878,6 +1001,19 @@ class ScenarioRunner:
             filename = substitute(step.get("filename") or "voice.mp3", self.vars)
             path = os.path.join(self.output_dir, filename)
             step_name = step.get("name") or "Озвучка"
+            # Дозапуск: готовый mp3 из прошлой попытки не переозвучиваем —
+            # это оплаченный результат (актуально, когда в параллельном батче
+            # озвучка успела, а сосед упал и батч не дошёл до чекпоинта).
+            if self._resume_state:
+                try:
+                    if os.path.getsize(path) > 0:
+                        log.info("Resume: %s уже озвучен — пропускаю синтез", filename)
+                        self.on_progress(idx, self._total_steps, step_name,
+                                         "Готово ранее — пропущено")
+                        self._set_output(step, path)
+                        return
+                except OSError:
+                    pass
             # Пишем статус задачи озвучки в прогресс пайплайна (для csv666 это
             # status_label сервиса: «В очереди», «Синтез…», «Готово»).
             def _voice_status(msg, _i=idx, _n=step_name):
@@ -972,8 +1108,34 @@ class ScenarioRunner:
                     self._check_skip(idx)
                     await asyncio.sleep(0.5)
 
+            # Дозапуск: картинки, скачанные прошлой попыткой, не генерируем
+            # заново — сверяемся по префиксу img_NNN в папке images.
+            resume_ready: dict[int, list] = {}
+            if self._resume_state:
+                images_dir = os.path.join(self.output_dir, "images")
+                if os.path.isdir(images_dir):
+                    for i in range(1, total + 1):
+                        prefix = f"img_{i:03d}_"
+                        found = sorted(
+                            os.path.join(images_dir, n)
+                            for n in os.listdir(images_dir)
+                            if n.startswith(prefix) and os.path.getsize(
+                                os.path.join(images_dir, n)) > 0
+                        )
+                        if found:
+                            resume_ready[i] = found
+                if resume_ready:
+                    log.info("Resume: %d/%d картинок уже скачаны — пропускаю их",
+                             len(resume_ready), total)
+
             async def _one(i: int, prompt: str):
                 nonlocal done_count, fail_count
+                ready = resume_ready.get(i)
+                if ready:
+                    results[i - 1] = ready
+                    async with done_lock:
+                        done_count += 1
+                    return
                 # Don't take a slot if we're already cancelled — saves credits
                 # on the prompts that haven't started yet.
                 self._check_cancel()

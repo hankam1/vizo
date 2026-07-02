@@ -3029,6 +3029,9 @@ function setProgressMode(status, st) {
   } else {
     if (st && st.output_dir) html += `<button class="vbtn secondary" onclick="openCurrentFolder()">📂 Открыть папку</button>`;
     if (status === 'error') html += `<button class="vbtn secondary" onclick="showErrorForRun(${st.run_id})">Подробности ошибки</button>`;
+    if ((status === 'error' || status === 'cancelled') && st && st.resumable) {
+      html += `<button class="vbtn" onclick="resumeRun(${st.run_id})">▶ Продолжить с места</button>`;
+    }
     html += `<button class="vbtn" onclick="openQueue()">← К очереди</button>`;
   }
   actions.innerHTML = html;
@@ -3170,7 +3173,8 @@ function queueCardHtml(r, queued) {
     acts += qIconBtn('x', 'Отменить (останется в списке)', `event.stopPropagation(); removeRun(${r.run_id})`, 'danger');
   } else {  // finished: done / error / cancelled
     if (r.status === 'cancelled' || r.status === 'error') {
-      acts += qIconBtn('restart', 'Возобновить — запустить заново с теми же параметрами', `event.stopPropagation(); restartRun(${r.run_id})`);
+      if (r.resumable) acts += qIconBtn('resume', 'Продолжить с места — готовые шаги (Claude, озвучка, картинки) не повторяются', `event.stopPropagation(); resumeRun(${r.run_id})`);
+      acts += qIconBtn('restart', 'Запустить заново с самого начала', `event.stopPropagation(); restartRun(${r.run_id})`);
     }
     if (r.output_dir) acts += qIconBtn('folder', 'Открыть папку', `event.stopPropagation(); openRunFolder(${r.run_id})`);
     acts += qIconBtn('x', 'Убрать из списка', `event.stopPropagation(); removeRun(${r.run_id})`);
@@ -3198,6 +3202,7 @@ function qIconBtn(kind, title, onclick, cls) {
     down: '<path d="m6 9 6 6 6-6"/>',
     folder: '<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>',
     restart: '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/>',
+    resume: '<path d="M8 5v14l11-7z"/>',
   };
   return `<button class="qbtn ${cls || ''}" title="${escapeHtml(title)}" onclick="${onclick}">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${icons[kind] || ''}</svg>
@@ -3206,6 +3211,12 @@ function qIconBtn(kind, title, onclick, cls) {
 
 async function resumeQueue() { if (api()) await api().resume_queue(); }
 async function removeRun(id) { if (api()) await api().remove_run(id); }
+// «Продолжить с места»: та же папка, готовые шаги пропускаются по чекпоинту.
+async function resumeRun(id) {
+  if (!api()) return;
+  const res = await api().resume_run(id);
+  await routeAfterStart(res);
+}
 async function openRunFolder(id) {
   const r = cachedRun(id);
   if (r && r.output_dir && api()) await api().open_folder(r.output_dir);

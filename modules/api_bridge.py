@@ -198,6 +198,9 @@ class _Run:
         # История между сессиями: когда завершился и восстановлен ли из файла.
         self.finished_at = None           # isoformat либо None
         self.restored = False             # True — загружен из run_history.json
+        # «Продолжить с места»: пайплайн должен переиспользовать output_dir
+        # и подхватить чекпоинт вместо старта с нуля.
+        self.resume_requested = False
 
     def public(self):
         """Plain dict pushed to JS (no thread/event/callable internals)."""
@@ -225,7 +228,27 @@ class _Run:
             "attempt": self.attempt,
             "finished_at": self.finished_at,
             "restored": self.restored,
+            "resumable": self.is_resumable(),
         }
+
+    def is_resumable(self) -> bool:
+        """Можно ли продолжить этот запуск с места падения (есть чекпоинт /
+        готовые артефакты в его папке)."""
+        if self.status not in ("error", "cancelled"):
+            return False
+        if self.fn is None or self.args is None or not self.output_dir:
+            return False
+        if self.kind == "scenario":
+            return os.path.exists(os.path.join(
+                self.output_dir, scenarios_mod.CHECKPOINT_FILENAME))
+        if self.kind == "translate":
+            # Сценарий перевода уже получен от Claude — самая дорогая часть.
+            path = os.path.join(self.output_dir, "script.txt")
+            try:
+                return os.path.getsize(path) > 0
+            except OSError:
+                return False
+        return False
 
 
 class Api:
@@ -1436,6 +1459,26 @@ class Api:
         self._save_history()
         return self._enqueue(run)
 
+    def resume_run(self, run_id: int):
+        """«Продолжить с места»: как restart_run, но в ТУ ЖЕ папку результата —
+        пайплайн подхватит чекпоинт/готовые артефакты и пропустит выполненные
+        шаги (Claude, озвучку, картинки не переделывает)."""
+        with self._qlock:
+            old = self._runs.get(run_id)
+            if old is None:
+                return {"ok": False, "error": "Запуск не найден"}
+            if not old.is_resumable():
+                return {"ok": False, "error": "Продолжить нечем — чекпоинт не "
+                        "найден. Используй обычный перезапуск."}
+            run = self._new_run(old.kind, old.title, old.subtitle, old.icon,
+                                list(old.steps), list(old.step_meta), old.fn, old.args)
+            self._copy_run_identity(old, run)
+            run.output_dir = old.output_dir
+            run.resume_requested = True
+            self._runs.pop(run_id, None)
+        self._save_history()
+        return self._enqueue(run)
+
     def reorder_queue(self, ordered_ids: list):
         """Reorder the waiting queue. ordered_ids lists queued run ids in the
         desired order; any omitted queued runs keep their relative order at the end."""
@@ -1565,6 +1608,11 @@ class Api:
     def _create_output_dir(self, label: str, suffix: str = "") -> str:
         rid = getattr(_run_ctx, "run_id", None) or self._active_run_id
         run = self._runs.get(rid) if rid is not None else None
+        # «Продолжить с места» кладёт результаты в ТУ ЖЕ папку — чекпоинт и
+        # готовые артефакты (script.txt, images/) лежат именно там.
+        if run is not None and run.output_dir:
+            os.makedirs(run.output_dir, exist_ok=True)
+            return run.output_dir
         # Имя, заданное пользователем при запуске, важнее автоимени: он его
         # выбрал, чтобы не путать одинаковые пайплайны в очереди.
         if run is not None and run.folder_name:
@@ -1616,6 +1664,16 @@ class Api:
         steps_total = len(scenario.get("steps", []))
         cancel_event = self._cancel_event  # захватываем СВОЙ event (см. _wait_for_user_reply)
 
+        # «Продолжить с места»: чекпоинт лежит в переиспользованной папке.
+        # Нет/битый/от другой версии сценария → честно едем с нуля (в ту же папку).
+        resume_state = None
+        rid = getattr(_run_ctx, "run_id", None)
+        cur_run = self._runs.get(rid) if rid is not None else None
+        if cur_run is not None and cur_run.resume_requested:
+            resume_state = scenarios_mod.load_checkpoint(output_dir, scenario)
+            if resume_state is None:
+                log.warning("Resume запрошен, но чекпоинт не подошёл — старт с нуля")
+
         def on_progress(idx, total, label, detail=None):
             pct = int(idx / max(total, 1) * 100) if total else 0
             self._progress(label or "...", pct, idx)
@@ -1639,6 +1697,7 @@ class Api:
             on_user_input=on_user_input,
             starting_vars=starting_vars,
             cancel_event=cancel_event,
+            resume_state=resume_state,
         )
         self._active_runner = runner
         try:
@@ -1716,54 +1775,86 @@ class Api:
             if is_cancelled():
                 raise scenarios_mod.ScenarioCancelled()
 
-        self._progress("Извлекаю транскрипт...", 5, 0)
-        transcript = get_transcript(url)
-        check_cancel()
+        # «Продолжить с места»: если в переиспользованной папке уже лежит
+        # script.txt — самая дорогая часть (Claude) готова, начинаем с превью
+        # и озвучки. _create_output_dir у resume-запуска возвращает СТАРУЮ папку.
+        rid = getattr(_run_ctx, "run_id", None)
+        cur_run = self._runs.get(rid) if rid is not None else None
+        resuming = bool(cur_run is not None and cur_run.resume_requested
+                        and cur_run.output_dir)
+        translated = None
+        output_dir = None
+        if resuming:
+            output_dir = self._create_output_dir(f"translate_{language}")
+            try:
+                sp = os.path.join(output_dir, "script.txt")
+                if os.path.getsize(sp) > 0:
+                    with open(sp, encoding="utf-8") as f:
+                        translated = f.read()
+                    log.info("translate resume: script.txt найден (%d симв.) — "
+                             "Claude пропускаем", len(translated))
+            except OSError:
+                pass
 
-        self._progress("Получаю заголовок и описание...", 12, 1)
-        orig_title = get_title(url)
-        orig_description = get_description(url)
-        check_cancel()
-
-        output_dir = self._create_output_dir(f"translate_{language}")
-
-        self._progress("Запускаю Claude...", 18, 2)
-        claude = ClaudeAutomation()
-        try:
-            await claude.start()
+        if translated is None:
+            self._progress("Извлекаю транскрипт...", 5, 0)
+            transcript = get_transcript(url)
             check_cancel()
-            self._progress(f"Перевожу на {language}...", 30, 3)
-            translated = await claude.run_translate(transcript, language,
-                                                    is_cancelled=is_cancelled)
 
-            self._progress("Генерирую SEO...", 65, 4)
-            seo_title, seo_description = await claude.run_seo(
-                orig_title, orig_description, language, is_cancelled=is_cancelled)
-        finally:
-            await claude.close()
-        check_cancel()
+            self._progress("Получаю заголовок и описание...", 12, 1)
+            orig_title = get_title(url)
+            orig_description = get_description(url)
+            check_cancel()
 
-        script_path    = os.path.join(output_dir, "script.txt")
-        seo_path       = os.path.join(output_dir, "seo.txt")
+            if output_dir is None:
+                output_dir = self._create_output_dir(f"translate_{language}")
+
+            self._progress("Запускаю Claude...", 18, 2)
+            claude = ClaudeAutomation()
+            try:
+                await claude.start()
+                check_cancel()
+                self._progress(f"Перевожу на {language}...", 30, 3)
+                translated = await claude.run_translate(transcript, language,
+                                                        is_cancelled=is_cancelled)
+
+                self._progress("Генерирую SEO...", 65, 4)
+                seo_title, seo_description = await claude.run_seo(
+                    orig_title, orig_description, language, is_cancelled=is_cancelled)
+            finally:
+                await claude.close()
+            check_cancel()
+
+            with open(os.path.join(output_dir, "script.txt"), "w", encoding="utf-8") as f:
+                f.write(translated)
+            with open(os.path.join(output_dir, "seo.txt"), "w", encoding="utf-8") as f:
+                f.write(f"{seo_title}\n\n\n\n{seo_description}")
+        else:
+            self._progress("Сценарий уже переведён — продолжаю", 75, 4)
+
         thumbnail_path = os.path.join(output_dir, "thumbnail.jpg")
         voice_path     = os.path.join(output_dir, "voiceover.mp3")
 
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(translated)
-        with open(seo_path, "w", encoding="utf-8") as f:
-            f.write(f"{seo_title}\n\n\n\n{seo_description}")
+        if not (resuming and os.path.exists(thumbnail_path)):
+            self._progress("Скачиваю превью...", 80, 5)
+            download_thumbnail(url, thumbnail_path)
 
-        self._progress("Скачиваю превью...", 80, 5)
-        download_thumbnail(url, thumbnail_path)
-
-        self._progress("Озвучиваю...", 90, 6)
-        loop = asyncio.get_event_loop()
-        voice_status = lambda msg: self._emit("progress_detail", {"detail": msg})
-        await loop.run_in_executor(
-            None, lambda: synthesize(translated, preset_key, voice_path,
-                                     cancel_check=is_cancelled,
-                                     status_callback=voice_status)
-        )
+        # Готовую озвучку из прошлой попытки не переозвучиваем — это деньги.
+        voice_ready = False
+        if resuming:
+            try:
+                voice_ready = os.path.getsize(voice_path) > 0
+            except OSError:
+                voice_ready = False
+        if not voice_ready:
+            self._progress("Озвучиваю...", 90, 6)
+            loop = asyncio.get_event_loop()
+            voice_status = lambda msg: self._emit("progress_detail", {"detail": msg})
+            await loop.run_in_executor(
+                None, lambda: synthesize(translated, preset_key, voice_path,
+                                         cancel_check=is_cancelled,
+                                         status_callback=voice_status)
+            )
 
         self._progress("Готово!", 100, 6)  # last valid step index (UI list has 7: 0..6)
         self._emit("done", {"output_dir": output_dir})
