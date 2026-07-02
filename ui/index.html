@@ -2919,8 +2919,7 @@ async function startTranslate() {
     </div>`, () => { setTimeout(() => { const el = document.getElementById('tr-folder'); if (el) el.focus(); }, 60); });
     return;
   }
-  const res = await api().start_translate(url, selectedLang);
-  await routeAfterStart(res);
+  await launchTranslate(url, null);
 }
 
 async function submitTranslateStart() {
@@ -2928,8 +2927,19 @@ async function submitTranslateStart() {
   const folderEl = document.getElementById('tr-folder');
   const folder = folderEl ? (folderEl.value || '').trim() : '';
   closeModal();
-  const res = await api().start_translate(url, selectedLang, folder || null);
-  await routeAfterStart(res);
+  await launchTranslate(url, folder || null);
+}
+
+async function launchTranslate(url, folder) {
+  const launch = async () => {
+    const res = await api().start_translate(url, selectedLang, folder);
+    await routeAfterStart(res);
+  };
+  try {
+    const dup = await api().find_duplicate(url, null, selectedLang);
+    if (dup && dup.found) { confirmDuplicate(dup, launch); return; }
+  } catch (e) {}
+  await launch();
 }
 
 // (Presets screen removed — Tartaria lives in Scenarios as builtin_tartaria)
@@ -3261,8 +3271,35 @@ async function submitRunWithInputs() {
   const folderEl = document.getElementById('qsv-folder');
   const folder = folderEl ? (folderEl.value || '').trim() : '';
   closeModal();
-  const res = await api().run_scenario(id, Object.keys(vars).length ? vars : null, folder || null);
-  await routeAfterStart(res);
+  const launch = async () => {
+    const res = await api().run_scenario(id, Object.keys(vars).length ? vars : null, folder || null);
+    await routeAfterStart(res);
+  };
+  const url = Object.values(vars).find(v => /^https?:/.test(v));
+  if (url) {
+    try {
+      const dup = await api().find_duplicate(url, id, null);
+      if (dup && dup.found) { confirmDuplicate(dup, launch); return; }
+    } catch (e) {}
+  }
+  await launch();
+}
+
+// Предупреждение «эта ссылка уже была в этом пайплайне» — не запрет:
+// кнопка «Запустить всё равно» продолжает запуск.
+function confirmDuplicate(dup, proceed) {
+  const what = dup.folder_name || dup.video_title || '';
+  showModal(`<div class="vmodal" style="width:480px;">
+    <h3>Уже есть такой запуск</h3>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:14px;">Эта ссылка уже запускалась в «${escapeHtml(dup.title || '')}»${what ? ' (' + escapeHtml(what) + ')' : ''} — статус: ${statusWord(dup.status)}. Запустить ещё раз?</p>
+    <div class="vmodal-actions">
+      <button class="vbtn secondary" onclick="closeModal()">Отмена</button>
+      <button class="vbtn" id="dup-proceed-btn">Запустить всё равно</button>
+    </div>
+  </div>`, () => {
+    const b = document.getElementById('dup-proceed-btn');
+    if (b) b.onclick = () => { closeModal(); proceed(); };
+  });
 }
 
 // «Возобновить»: перезапустить отменённый/упавший запуск с теми же параметрами.

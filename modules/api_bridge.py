@@ -18,7 +18,7 @@ from modules import settings, updater, veo_api
 from modules import voices as voices_mod
 from modules import languages as languages_mod
 from modules import scenarios as scenarios_mod
-from modules.transcript import get_transcript, get_title, get_description, download_thumbnail
+from modules.transcript import get_transcript, get_title, get_description, download_thumbnail, extract_video_id
 from modules.voice_api import synthesize, VoiceCancelled
 from modules.voice_templates import resolve_lang
 from modules.claude_ui import ClaudeAutomation
@@ -947,6 +947,51 @@ class Api:
             "run_id": run.run_id,
             "started": (self._active_run_id == run.run_id),
             "position": self._queue_position(run.run_id),
+        }
+
+    def find_duplicate(self, url: str, scenario_id: str = None, language: str = None):
+        """Есть ли уже запуск с этой же ссылкой В ТОМ ЖЕ пайплайне.
+
+        Та же ссылка в другом сценарии — это норма (пользователь гоняет одно
+        видео через разные пайплайны), поэтому сравниваем только внутри одного
+        сценария (scenario_id) или одного языка перевода (language). Ссылки
+        сводятся к video id: youtu.be/X и youtube.com/watch?v=X — одно видео.
+        Возвращает данные самого свежего совпадения — UI показывает
+        предупреждение с кнопкой «запустить всё равно», это не запрет."""
+        u = (url or "").strip()
+        if not u:
+            return {"found": False}
+        vid = extract_video_id(u)
+
+        def same_url(other):
+            if not other:
+                return False
+            if vid:
+                return extract_video_id(other) == vid
+            return other.strip() == u
+
+        best = None
+        with self._qlock:
+            for r in self._runs.values():
+                if scenario_id is not None:
+                    if r.scenario_id != scenario_id:
+                        continue
+                elif language is not None:
+                    if r.kind != "translate" or r.title != f"Перевод — {language}":
+                        continue
+                else:
+                    continue
+                if same_url(r.url) and (best is None or r.run_id > best.run_id):
+                    best = r
+        if best is None:
+            return {"found": False}
+        return {
+            "found": True,
+            "run_id": best.run_id,
+            "status": best.status,
+            "title": best.title,
+            "video_title": best.video_title,
+            "folder_name": best.folder_name,
         }
 
     @staticmethod
