@@ -172,6 +172,9 @@ class _Run:
         self.thread = None
         self.runner = None                # ScenarioRunner (scenario kind) for skip/cancel
         self.output_dir = None
+        # Имя папки результата, заданное пользователем при запуске (или None —
+        # автоимя). Нужно, чтобы различать одинаковые пайплайны в очереди.
+        self.folder_name = None
         # status: queued | running | waiting_input | done | error | cancelled
         self.status = "queued"
         # live progress snapshot (so the UI can repaint on return)
@@ -204,6 +207,7 @@ class _Run:
             "pending_input": self.pending_input,
             "error": self.error,
             "output_dir": self.output_dir,
+            "folder_name": self.folder_name,
             "cancelled_at_step": self.cancelled_at_step,
             "attempt": self.attempt,
         }
@@ -348,7 +352,7 @@ class Api:
         try:
             out = run.output_dir or data.get("output_dir")
             if not out:
-                out = self._create_output_dir((run.title or "run") + " ОШИБКА")
+                out = self._create_output_dir(run.title or "run", suffix=" ОШИБКА")
                 run.output_dir = out
             os.makedirs(out, exist_ok=True)
             path = os.path.join(out, "ОШИБКА.txt")
@@ -493,19 +497,24 @@ class Api:
 
     # --- Pipeline runners ---
 
-    def start_translate(self, url: str, language: str):
+    def start_translate(self, url: str, language: str, folder_name: str = None):
         steps = ["Извлечь транскрипт", "Получить заголовок", "Запустить Claude",
                  "Перевод", "SEO", "Превью", "Озвучка"]
-        run = self._new_run("translate", f"Перевод — {language}", url, "🌐",
+        folder = (folder_name or "").strip() or None
+        run = self._new_run("translate", f"Перевод — {language}",
+                            f"{folder} — {url}" if folder else url, "🌐",
                             steps, [], self._pipeline_translate, (url, language))
+        run.folder_name = folder
         return self._enqueue(run)
 
-    def start_preset(self, url: str, preset: str, generate_images_flag: bool = True):
+    def start_preset(self, url: str, preset: str, generate_images_flag: bool = True,
+                     folder_name: str = None):
         steps = ["Заголовок", "Транскрипт", "Запустить Claude", "Сценарий",
                  "Картинки + Озвучка" if generate_images_flag else "Озвучка", "Готово"]
         run = self._new_run("preset", "Тартария", url, "🏛️",
                             steps, [], self._pipeline_preset,
                             (url, preset, generate_images_flag))
+        run.folder_name = (folder_name or "").strip() or None
         return self._enqueue(run)
 
     # --- Standalone Generation (VeoNonStop) ---
@@ -864,9 +873,14 @@ class Api:
     def validate_scenario(self, scenario: dict):
         return {"errors": scenarios_mod.validate(scenario)}
 
-    def run_scenario(self, scenario_id: str, starting_vars: dict = None):
+    def run_scenario(self, scenario_id: str, starting_vars: dict = None,
+                     folder_name: str = None):
         """Enqueue a scenario run. It starts immediately if nothing else is
-        running, otherwise it waits in the queue and auto-starts in turn."""
+        running, otherwise it waits in the queue and auto-starts in turn.
+
+        folder_name — пользовательское имя папки результата (см. настройку
+        ask_folder_name); показывается подзаголовком в очереди, чтобы
+        различать несколько запусков одного сценария."""
         scenario = scenarios_mod.get(scenario_id)
         if not scenario:
             return {"ok": False, "error": "Сценарий не найден"}
@@ -876,11 +890,13 @@ class Api:
              "parallel_with_previous": bool(s.get("parallel_with_previous"))}
             for s in scenario.get("steps", [])
         ]
+        folder = (folder_name or "").strip() or None
         run = self._new_run(
-            "scenario", scenario.get("name") or "Сценарий", "",
+            "scenario", scenario.get("name") or "Сценарий", folder or "",
             scenario.get("icon") or "", steps, step_meta,
             self._pipeline_scenario, (scenario, starting_vars or {}),
         )
+        run.folder_name = folder
         return self._enqueue(run)
 
     # --- Queue management ---
@@ -1004,6 +1020,7 @@ class Api:
                 # doesn't pile up; only the FINAL failure notifies the user.
                 clone = self._new_run(run.kind, run.title, run.subtitle, run.icon,
                                       list(run.steps), list(run.step_meta), run.fn, run.args)
+                clone.folder_name = run.folder_name
                 clone.retries_left = run.retries_left - 1
                 clone.attempt = run.attempt + 1
                 self._runs[clone.run_id] = clone
@@ -1184,6 +1201,7 @@ class Api:
                 return {"ok": False, "error": "Запуск не найден"}
             run = self._new_run(old.kind, old.title, old.subtitle, old.icon,
                                 list(old.steps), list(old.step_meta), old.fn, old.args)
+            run.folder_name = old.folder_name
             # Resuming replaces the old entry — remove it if it has finished.
             if old.status in ("done", "error", "cancelled"):
                 self._runs.pop(run_id, None)
@@ -1315,10 +1333,16 @@ class Api:
 
     # --- Internal pipeline helpers ---
 
-    def _create_output_dir(self, label: str) -> str:
+    def _create_output_dir(self, label: str, suffix: str = "") -> str:
+        rid = getattr(_run_ctx, "run_id", None) or self._active_run_id
+        run = self._runs.get(rid) if rid is not None else None
+        # Имя, заданное пользователем при запуске, важнее автоимени: он его
+        # выбрал, чтобы не путать одинаковые пайплайны в очереди.
+        if run is not None and run.folder_name:
+            label = run.folder_name
         base = settings.load().get("output_dir") or settings.DEFAULT_OUTPUT_DIR
         date = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        folder = os.path.join(base, f"{date}_{_safe_name(label)}")
+        folder = os.path.join(base, f"{date}_{_safe_name(label + suffix)}")
         # Уникализируем: «отменил и сразу перезапустил» в ту же минуту не
         # должно смешивать файлы двух запусков в одной папке.
         if os.path.exists(folder):
@@ -1330,8 +1354,6 @@ class Api:
         os.makedirs(folder, exist_ok=True)
         # Remember the folder on the run so an error report lands next to the
         # files, and the queue/status UI can offer "open folder".
-        rid = getattr(_run_ctx, "run_id", None) or self._active_run_id
-        run = self._runs.get(rid) if rid is not None else None
         if run is not None and not run.output_dir:
             run.output_dir = folder
         return folder

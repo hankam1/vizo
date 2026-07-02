@@ -1777,6 +1777,11 @@ audio { width: 100%; }
               <input class="vinput" id="set-output-dir">
               <button class="vbtn secondary" onclick="pickFolder()">Обзор...</button>
             </div>
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:16px;">
+              <input type="checkbox" id="set-ask-folder" style="width:18px;height:18px;accent-color:var(--accent);flex-shrink:0;">
+              <span>Спрашивать название папки при запуске</span>
+            </label>
+            <p style="color:var(--muted);font-size:12px;margin-top:8px;">Помогает не путаться, когда в очереди несколько запусков одного пайплайна: название видно в очереди и в имени папки результата. Пусто — обычное автоимя (дата + название).</p>
           </section>
           <section class="vsection">
             <div class="vsection-head">
@@ -2748,6 +2753,7 @@ async function loadSettings() {
   const out = document.getElementById('set-output-dir'); if (out) out.value = s.output_dir || '';
   const notif = document.getElementById('set-notify'); if (notif) notif.checked = (s.notify_on_complete !== false);
   const retry = document.getElementById('set-auto-retry'); if (retry) retry.value = (s.auto_retry != null ? s.auto_retry : 1);
+  const askf = document.getElementById('set-ask-folder'); if (askf) askf.checked = (s.ask_folder_name !== false);
   try {
     const v = await api().get_version();
     const ve = document.getElementById('version-text');
@@ -2768,6 +2774,7 @@ async function saveSettings() {
     output_dir: document.getElementById('set-output-dir').value,
     notify_on_complete: !!(document.getElementById('set-notify') && document.getElementById('set-notify').checked),
     auto_retry: retryN,
+    ask_folder_name: !!(document.getElementById('set-ask-folder') && document.getElementById('set-ask-folder').checked),
   });
   toast('Сохранено', 'success');
 }
@@ -2897,7 +2904,31 @@ async function startTranslate() {
   } else if (!s.voice_api_key) {
     return toast('Укажи Voice API ключ', 'error');
   }
+  if (s.ask_folder_name !== false) {
+    showModal(`<div class="vmodal" style="width:480px;">
+      <h3>Запуск «Перевод — ${escapeHtml(selectedLang)}»</h3>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:14px;">Название папки поможет различать запуски в очереди. Пусто — обычное автоимя.</p>
+      <div style="margin-bottom:12px;">
+        <label class="vfield-label">Название папки результата</label>
+        <input class="vinput" id="tr-folder" placeholder="пусто — авто (дата + название)">
+      </div>
+      <div class="vmodal-actions">
+        <button class="vbtn secondary" onclick="closeModal()">Отмена</button>
+        <button class="vbtn" onclick="submitTranslateStart()">Запустить</button>
+      </div>
+    </div>`, () => { setTimeout(() => { const el = document.getElementById('tr-folder'); if (el) el.focus(); }, 60); });
+    return;
+  }
   const res = await api().start_translate(url, selectedLang);
+  await routeAfterStart(res);
+}
+
+async function submitTranslateStart() {
+  const url = document.getElementById('tr-url').value.trim();
+  const folderEl = document.getElementById('tr-folder');
+  const folder = folderEl ? (folderEl.value || '').trim() : '';
+  closeModal();
+  const res = await api().start_translate(url, selectedLang, folder || null);
   await routeAfterStart(res);
 }
 
@@ -3175,9 +3206,13 @@ async function routeAfterStart(res) {
 
 // Если в сценарии есть шаг yt_url — спросить ссылку СРАЗУ, чтобы запуск шёл сам
 // (можно поставить несколько на ночь). Пусто → ссылку спросит во время запуска.
-function runScenarioWithInputs(scenario, id) {
+// При включённой настройке ask_folder_name там же спрашивается название папки
+// результата — чтобы различать несколько запусков одного сценария в очереди.
+async function runScenarioWithInputs(scenario, id) {
   const urlSteps = (scenario.steps || []).filter(st => st.type === 'yt_url');
-  if (!urlSteps.length) {
+  let askFolder = true;
+  try { const s = await api().load_settings(); askFolder = (s.ask_folder_name !== false); } catch (e) {}
+  if (!urlSteps.length && !askFolder) {
     return api().run_scenario(id).then(routeAfterStart);
   }
   window._pendingRunId = id;
@@ -3187,16 +3222,24 @@ function runScenarioWithInputs(scenario, id) {
       <label class="vfield-label">${escapeHtml(st.name || 'Ссылка на YouTube видео')}</label>
       <input class="vinput" id="qsv-url-${i}" placeholder="https://youtube.com/watch?v=…">
     </div>`).join('');
+  const folderRow = !askFolder ? '' : `
+    <div style="margin-bottom:12px;">
+      <label class="vfield-label">Название папки результата</label>
+      <input class="vinput" id="qsv-folder" placeholder="пусто — авто (дата + название)">
+    </div>`;
+  const hint = urlSteps.length
+    ? 'Укажи ссылку сразу — тогда запуск пойдёт сам, без остановки на ввод. Можно оставить пустым и ввести во время выполнения.'
+    : 'Название папки поможет различать запуски в очереди. Пусто — обычное автоимя.';
   showModal(`<div class="vmodal" style="width:520px;">
     <h3>Запуск «${escapeHtml(scenario.name || 'Сценарий')}»</h3>
-    <p style="color:var(--muted);font-size:13px;margin-bottom:14px;">Укажи ссылку сразу — тогда запуск пойдёт сам, без остановки на ввод. Можно оставить пустым и ввести во время выполнения.</p>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:14px;">${hint}</p>
     ${rows}
+    ${folderRow}
     <div class="vmodal-actions">
       <button class="vbtn secondary" onclick="closeModal()">Отмена</button>
       <button class="vbtn" onclick="submitRunWithInputs()">Запустить</button>
     </div>
-  </div>`, () => { setTimeout(() => { const el = document.getElementById('qsv-url-0'); if (el) el.focus(); }, 60); });
-  return Promise.resolve();
+  </div>`, () => { setTimeout(() => { const el = document.getElementById('qsv-url-0') || document.getElementById('qsv-folder'); if (el) el.focus(); }, 60); });
 }
 
 async function submitRunWithInputs() {
@@ -3208,8 +3251,10 @@ async function submitRunWithInputs() {
     const v = el ? (el.value || '').trim() : '';
     if (v) vars[st.output || 'url'] = v;
   });
+  const folderEl = document.getElementById('qsv-folder');
+  const folder = folderEl ? (folderEl.value || '').trim() : '';
   closeModal();
-  const res = await api().run_scenario(id, Object.keys(vars).length ? vars : null);
+  const res = await api().run_scenario(id, Object.keys(vars).length ? vars : null, folder || null);
   await routeAfterStart(res);
 }
 

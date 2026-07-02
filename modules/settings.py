@@ -16,6 +16,9 @@ DEFAULTS = {
     # How many times to auto-retry a run that failed with a TRANSIENT error
     # (network / timeout). 0 = off.
     "auto_retry": 1,
+    # Ask for a custom output-folder name before starting a pipeline — helps
+    # tell queued runs of the SAME pipeline apart. Empty answer = auto name.
+    "ask_folder_name": True,
 }
 
 
