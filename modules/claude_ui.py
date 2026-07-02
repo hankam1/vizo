@@ -847,6 +847,21 @@ class ClaudeAutomation:
                     if (di > 50) t = t.slice(0, di).trim();
                     return t;
                 }
+                // Свёрнутые «размышления» (extended thinking) рендерятся
+                // ВНУТРИ контейнера ответа как pill со сводкой — innerText
+                // захватывал её вместе с текстом, и «I notice the user
+                // prompt is empty…» уезжал в script.txt и озвучку. Прячем
+                // pill'ы на время чтения: display:none исключает их из
+                // innerText. Кнопка copy этим не страдает — фикс только
+                // для DOM-фолбэка.
+                function extractClean(node) {
+                    const pills = node.querySelectorAll('[class*="msg-pill"]');
+                    const saved = [];
+                    pills.forEach(p => { saved.push(p.style.display); p.style.display = 'none'; });
+                    const txt = (node.innerText || '').trim();
+                    pills.forEach((p, i) => { p.style.display = saved[i]; });
+                    return txt;
+                }
                 const SELECTORS = [
                     '[data-testid="assistant-message"]',
                     '[data-test-render-count][data-message-role="assistant"]',
@@ -859,7 +874,7 @@ class ClaudeAutomation:
                 for (const sel of SELECTORS) {
                     const nodes = document.querySelectorAll(sel);
                     if (nodes.length) {
-                        const txt = nodes[nodes.length - 1].innerText.trim();
+                        const txt = extractClean(nodes[nodes.length - 1]);
                         if (txt) return clean(txt);
                     }
                 }

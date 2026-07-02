@@ -127,6 +127,7 @@ VEO_BASE = "https://veononstop.org/api/v1"
 | macOS: промпт уходил пустым (Ctrl+V не вставляет в Chrome) | `EDIT_MODIFIER = Meta` на darwin, `Control` иначе (`claude_ui.py`) |
 | macOS: проверка «профиль Chrome занят» не работала (`SingletonLock` — висячий симлинк, `os.path.exists` его не видит) | `lexists` + проверка живости pid из симлинка; протухшие локи удаляются автоматически, ошибка только при живом Chrome |
 | macOS: нет звука уведомлений (`winsound` — Windows-only) | `afplay` системных звуков (Glass/Sosumi) на darwin |
+| Сводка «размышлений» (extended thinking) попадала в результат: pill с ней рендерится ВНУТРИ `.font-claude-response`, и DOM-фолбэк извлечения захватывал её вместе с ответом (кнопка copy чистая — страдал только фолбэк) | `extractClean` в `_last_response_text`: прячет `[class*="msg-pill"]` через `display:none` на время чтения `innerText` |
 
 ---
 
