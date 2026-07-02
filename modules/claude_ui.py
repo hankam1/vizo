@@ -497,6 +497,9 @@ class ClaudeAutomation:
         last_err = None
         for attempt in range(4):
             try:
+                # Меню ещё закрыто — блуждающий base-ui оверлей мог остаться
+                # от прошлого попапа и съесть клик по селектору.
+                await self._neutralize_overlays()
                 await self.page.locator(
                     '[data-testid="model-selector-dropdown"]'
                 ).first.click(timeout=5_000)
@@ -565,7 +568,12 @@ class ClaudeAutomation:
                     "Не удалось прикрепить файлы к сообщению Claude: "
                     "не найден элемент загрузки. Возможно, claude.ai обновил вёрстку."
                 )
-            await attach_btn.click()
+            await self._neutralize_overlays()
+            try:
+                await attach_btn.click(timeout=5_000)
+            except Exception as e:
+                log.warning("Клик по кнопке вложений не прошёл (%s) — force", e)
+                await attach_btn.click(timeout=5_000, force=True)
             await asyncio.sleep(0.5)
             file_input = await self.page.wait_for_selector('input[type="file"]', timeout=5_000)
             await file_input.set_input_files(paths)
@@ -614,7 +622,21 @@ class ClaudeAutomation:
             await self._upload_files(file_paths)
 
         input_el = await self._get_input()
-        await input_el.click()
+        # base-ui порталы claude.ai перекрывают страницу и перехватывают
+        # клики (та же болезнь, что у кнопки copy в _last_response_text) —
+        # без нейтрализации клик по полю ввода умирал по таймауту 30с.
+        await self._neutralize_overlays()
+        try:
+            await input_el.click(timeout=5_000)
+        except Exception as e:
+            log.warning("Клик по полю ввода не прошёл (%s) — force/JS-фолбэк", e)
+            await self._neutralize_overlays()
+            try:
+                await input_el.click(timeout=5_000, force=True)
+            except Exception:
+                # Последний рубеж: программный фокус. ProseMirror после
+                # focus() принимает вставку с клавиатуры как после клика.
+                await input_el.evaluate("el => el.focus()")
         await _human_pause(0.3, 0.7)
         await self._paste_text(text)
 
