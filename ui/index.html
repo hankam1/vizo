@@ -2101,6 +2101,11 @@ audio { width: 100%; }
       <div style="display:flex;align-items:center;gap:18px;">
         <span class="vmono" id="scen-count">— сценариев</span>
         <div style="display:flex;gap:6px;align-items:center;">
+          <button class="vbtn icon" onclick="openBatchLaunch()" aria-label="Пакетный запуск" title="Пакетный запуск — несколько ссылок в один сценарий разом">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M11 12H3"/><path d="M16 6H3"/><path d="M16 18H3"/><path d="M18 9v6"/><path d="M21 12h-6"/>
+            </svg>
+          </button>
           <button class="vbtn icon" onclick="importScenario()" aria-label="Импортировать из файла" title="Импортировать сценарий из файла">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -3283,6 +3288,103 @@ async function submitRunWithInputs() {
     } catch (e) {}
   }
   await launch();
+}
+
+// ============================================================
+// BATCH LAUNCH — несколько ссылок в один сценарий разом
+// ============================================================
+async function openBatchLaunch() {
+  if (!api()) return;
+  if (!scenariosCache.length) {
+    try { scenariosCache = await api().list_scenarios() || []; } catch (e) {}
+  }
+  const withUrl = scenariosCache.filter(s => (s.steps || []).some(st => st.type === 'yt_url'));
+  if (!withUrl.length) return toast('Нет сценариев с шагом «Ссылка на YouTube»', 'error');
+  const opts = withUrl.map(s =>
+    `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name || 'Сценарий')}</option>`).join('');
+  showModal(`<div class="vmodal wide" style="width:560px;">
+    <h3>Пакетный запуск</h3>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:14px;">Каждая строка — один запуск. После ссылки можно задать название папки через <code>|</code>: <code>https://youtu.be/xxx | утренний выпуск</code></p>
+    <label class="vfield-label">Сценарий</label>
+    <select class="vinput" id="batch-scenario" style="margin-bottom:12px;">${opts}</select>
+    <label class="vfield-label">Ссылки (по одной на строку)</label>
+    <textarea class="vinput" id="batch-links" rows="8" style="resize:vertical;min-height:140px;" placeholder="https://youtube.com/watch?v=…&#10;https://youtu.be/… | название папки"></textarea>
+    <div class="vmodal-actions">
+      <button class="vbtn secondary" onclick="closeModal()">Отмена</button>
+      <button class="vbtn" onclick="submitBatchLaunch()">Запустить все</button>
+    </div>
+  </div>`, () => { setTimeout(() => { const el = document.getElementById('batch-links'); if (el) el.focus(); }, 60); });
+}
+
+// Разбор строк пакетного запуска: "url | имя папки" → {url, folder}.
+// Невалидные строки и повторы внутри списка отбрасываются.
+function parseBatchLines(raw) {
+  const items = [], seen = new Set();
+  let bad = 0;
+  (raw || '').split('\n').forEach(line => {
+    const t = line.trim();
+    if (!t) return;
+    const sep = t.indexOf('|');
+    const url = (sep >= 0 ? t.slice(0, sep) : t).trim();
+    const folder = sep >= 0 ? t.slice(sep + 1).trim() : '';
+    if (!/^https?:\/\//.test(url)) { bad++; return; }
+    if (seen.has(url)) return;
+    seen.add(url);
+    items.push({ url, folder });
+  });
+  return { items, bad };
+}
+
+async function submitBatchLaunch() {
+  const scenId = document.getElementById('batch-scenario').value;
+  const raw = (document.getElementById('batch-links').value || '').trim();
+  if (!raw) return toast('Вставь хотя бы одну ссылку', 'error');
+  const { items, bad } = parseBatchLines(raw);
+  if (!items.length) return toast('Не нашёл ни одной валидной ссылки', 'error');
+  const scen = scenariosCache.find(s => s.id === scenId) || await api().get_scenario(scenId);
+  const urlStep = ((scen && scen.steps) || []).find(st => st.type === 'yt_url');
+  const varName = (urlStep && urlStep.output) || 'url';
+  if (bad) toast(`Пропущено строк без ссылки: ${bad}`, 'error');
+
+  const launchAll = async (list) => {
+    if (!list.length) return toast('Запускать нечего', 'error');
+    for (const it of list) {
+      await api().run_scenario(scenId, { [varName]: it.url }, it.folder || null);
+    }
+    if (api()) { const snap = await api().list_runs(); if (snap) applyQueueSnapshot(snap); }
+    toast(`Добавлено запусков: ${list.length}`, 'success');
+    openQueue();
+  };
+
+  // Дубли против очереди/истории — только в этом же сценарии.
+  const dups = [];
+  for (const it of items) {
+    try {
+      const d = await api().find_duplicate(it.url, scenId, null);
+      if (d && d.found) dups.push(it);
+    } catch (e) {}
+  }
+  closeModal();
+  if (dups.length) {
+    const rest = items.filter(it => !dups.includes(it));
+    showModal(`<div class="vmodal" style="width:520px;">
+      <h3>Найдены дубли (${dups.length})</h3>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:10px;">Эти ссылки уже запускались в этом сценарии:</p>
+      <div style="max-height:160px;overflow:auto;font-size:12px;color:var(--muted);margin-bottom:14px;word-break:break-all;">${dups.map(d => escapeHtml(d.url)).join('<br>')}</div>
+      <div class="vmodal-actions">
+        <button class="vbtn secondary" onclick="closeModal()">Отмена</button>
+        <button class="vbtn secondary" id="batch-skip-btn">Без дублей (${rest.length})</button>
+        <button class="vbtn" id="batch-all-btn">Запустить все (${items.length})</button>
+      </div>
+    </div>`, () => {
+      const s = document.getElementById('batch-skip-btn');
+      if (s) s.onclick = () => { closeModal(); launchAll(rest); };
+      const a = document.getElementById('batch-all-btn');
+      if (a) a.onclick = () => { closeModal(); launchAll(items); };
+    });
+    return;
+  }
+  await launchAll(items);
 }
 
 // Предупреждение «эта ссылка уже была в этом пайплайне» — не запрет:
