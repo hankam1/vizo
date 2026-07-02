@@ -175,6 +175,13 @@ class _Run:
         # Имя папки результата, заданное пользователем при запуске (или None —
         # автоимя). Нужно, чтобы различать одинаковые пайплайны в очереди.
         self.folder_name = None
+        # Ссылка на YouTube (если запуск с ней стартовал) и id сценария —
+        # для проверки дублей «та же ссылка в том же пайплайне».
+        self.url = None
+        self.scenario_id = None
+        # Название ролика с YouTube — подтягивается фоном после постановки в
+        # очередь, чтобы карточка говорила о видео больше, чем голая ссылка.
+        self.video_title = None
         # status: queued | running | waiting_input | done | error | cancelled
         self.status = "queued"
         # live progress snapshot (so the UI can repaint on return)
@@ -208,6 +215,9 @@ class _Run:
             "error": self.error,
             "output_dir": self.output_dir,
             "folder_name": self.folder_name,
+            "url": self.url,
+            "scenario_id": self.scenario_id,
+            "video_title": self.video_title,
             "cancelled_at_step": self.cancelled_at_step,
             "attempt": self.attempt,
         }
@@ -237,6 +247,7 @@ class Api:
         self._queue_paused = False            # set True when the user cancels the active run
         self._qlock = threading.RLock()
         self._batch_ids = set()               # runs since the queue was last idle (for the "done" notification)
+        self._title_cache = {}                # url -> название ролика (для карточек очереди)
 
     def set_window(self, window):
         self._window = window
@@ -505,6 +516,8 @@ class Api:
                             f"{folder} — {url}" if folder else url, "🌐",
                             steps, [], self._pipeline_translate, (url, language))
         run.folder_name = folder
+        run.url = (url or "").strip() or None
+        self._fetch_video_title(run)
         return self._enqueue(run)
 
     def start_preset(self, url: str, preset: str, generate_images_flag: bool = True,
@@ -897,6 +910,14 @@ class Api:
             self._pipeline_scenario, (scenario, starting_vars or {}),
         )
         run.folder_name = folder
+        run.scenario_id = scenario.get("id")
+        # URL из заранее введённых переменных (см. runScenarioWithInputs):
+        # значение любого yt_url-шага. Нужен для заголовка ролика и дублей.
+        for v in (starting_vars or {}).values():
+            if isinstance(v, str) and v.strip().startswith(("http://", "https://")):
+                run.url = v.strip()
+                break
+        self._fetch_video_title(run)
         return self._enqueue(run)
 
     # --- Queue management ---
@@ -927,6 +948,39 @@ class Api:
             "started": (self._active_run_id == run.run_id),
             "position": self._queue_position(run.run_id),
         }
+
+    @staticmethod
+    def _copy_run_identity(src, dst):
+        """Перенести пользовательские атрибуты запуска на его клон
+        (авто-повтор / «Возобновить»)."""
+        dst.folder_name = src.folder_name
+        dst.url = src.url
+        dst.scenario_id = src.scenario_id
+        dst.video_title = src.video_title
+
+    def _fetch_video_title(self, run):
+        """Подтянуть название YouTube-ролика фоном и обновить карточку очереди.
+
+        Голая ссылка в карточке ни о чём не говорит, когда в очереди много
+        запусков. Ошибки глотаем: название — украшение, не данные пайплайна."""
+        url = run.url
+        if not url:
+            return
+        cached = self._title_cache.get(url)
+        if cached:
+            run.video_title = cached
+            return
+
+        def work():
+            try:
+                title = get_title(url)
+            except Exception:
+                title = ""
+            if title:
+                self._title_cache[url] = title
+                run.video_title = title
+                self._emit_queue()
+        threading.Thread(target=work, daemon=True).start()
 
     def _queue_position(self, run_id):
         with self._qlock:
@@ -1020,7 +1074,7 @@ class Api:
                 # doesn't pile up; only the FINAL failure notifies the user.
                 clone = self._new_run(run.kind, run.title, run.subtitle, run.icon,
                                       list(run.steps), list(run.step_meta), run.fn, run.args)
-                clone.folder_name = run.folder_name
+                self._copy_run_identity(run, clone)
                 clone.retries_left = run.retries_left - 1
                 clone.attempt = run.attempt + 1
                 self._runs[clone.run_id] = clone
@@ -1201,7 +1255,7 @@ class Api:
                 return {"ok": False, "error": "Запуск не найден"}
             run = self._new_run(old.kind, old.title, old.subtitle, old.icon,
                                 list(old.steps), list(old.step_meta), old.fn, old.args)
-            run.folder_name = old.folder_name
+            self._copy_run_identity(old, run)
             # Resuming replaces the old entry — remove it if it has finished.
             if old.status in ("done", "error", "cancelled"):
                 self._runs.pop(run_id, None)

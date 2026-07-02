@@ -2977,7 +2977,9 @@ function renderRunSnapshot(st) {
   currentStepIdx = (st.status === 'done') ? currentSteps.length
                  : queued ? -1
                  : (st.index || 0);
-  document.getElementById('prog-title').textContent = st.title || 'Выполнение';
+  const progLabel = st.folder_name || st.video_title;
+  document.getElementById('prog-title').textContent =
+    (st.title || 'Выполнение') + (progLabel ? ' — ' + progLabel : '');
   document.getElementById('prog-text').textContent = st.step_text || '…';
   document.getElementById('prog-detail').textContent = st.detail || '';
   document.getElementById('prog-fill').style.width = (st.percent || 0) + '%';
@@ -3102,9 +3104,14 @@ function queueCardHtml(r, queued) {
   const ico = (r.icon && /^(https?:|data:)/.test(r.icon))
     ? `<img src="${escapeHtml(r.icon)}" style="width:100%;height:100%;border-radius:10px;object-fit:cover;">`
     : escapeHtml(r.icon || '▶');
+  // Подпись карточки: имя папки (выбрал пользователь) + название ролика
+  // (подтянулось с YouTube) информативнее голой ссылки из subtitle.
+  const subParts = [];
+  if (r.folder_name) subParts.push(r.folder_name);
+  if (r.video_title) subParts.push(r.video_title);
   const sub = isActive
     ? (escapeHtml(r.step_text || '') + (r.detail ? ' · ' + escapeHtml(r.detail) : ''))
-    : escapeHtml(r.subtitle || statusWord(r.status));
+    : escapeHtml(subParts.join(' · ') || r.subtitle || statusWord(r.status));
   const bar = isActive ? `<div class="qcard-bar"><i style="width:${r.percent || 0}%"></i></div>` : '';
   let acts = '';
   if (isActive) {
