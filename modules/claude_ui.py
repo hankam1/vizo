@@ -1,6 +1,8 @@
 import asyncio
 import os
 import random
+import subprocess
+import sys
 import pyperclip
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
@@ -21,6 +23,92 @@ async def _human_pause(lo: float = 0.4, hi: float = 1.2):
     await asyncio.sleep(random.uniform(lo, hi))
 
 CLAUDE_NEW_CHAT = "https://claude.ai/new"
+
+# Модификатор для шорткатов редактирования: на macOS Chrome реагирует только
+# на Cmd (Meta) — Ctrl+V там НЕ вставляет, из-за чего промпт уходил пустым
+# (текст копировался в буфер, но в поле ввода ничего не появлялось).
+EDIT_MODIFIER = "Meta" if sys.platform == "darwin" else "Control"
+
+
+def _chrome_pid_alive(pid: int) -> bool:
+    """Жив ли процесс `pid` и похож ли он на Chrome.
+
+    PID из протухшего лока после перезагрузки может достаться совсем другому
+    процессу — тогда профиль на самом деле свободен. Если уточнить имя
+    процесса не удалось, считаем занятым (консервативно)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # PermissionError и пр. — процесс есть, но чужой
+    try:
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                             capture_output=True, text=True, timeout=5)
+        comm = (out.stdout or "").strip().lower()
+        if comm and "chrom" not in comm:
+            return False  # pid переиспользован не-Chrome процессом
+    except Exception:
+        pass
+    return True
+
+
+def _ensure_profile_not_locked(profile_dir: str):
+    """Убедиться, что профиль Chrome не занят другим ЖИВЫМ окном.
+
+    Запускать второй экземпляр Chrome поверх занятого профиля — плохая идея:
+    либо упадёт через несколько секунд, либо обе сессии полезут на claude.ai
+    одновременно и это выглядит как два параллельных юзера.
+
+    Протухшие lock-файлы (остаются после краша или жёсткого завершения
+    Chrome) удаляются автоматически — ручное удаление не требуется.
+
+    Windows: Chrome держит `lockfile` открытым (FILE_FLAG_DELETE_ON_CLOSE) —
+    если файл удалился, он был протухшим; если нет — Chrome жив.
+
+    macOS/Linux: `SingletonLock` — симлинк вида `hostname-pid`, обычно
+    висячий, поэтому os.path.exists его НЕ видит — только lexists.
+    Проверяем, что pid жив и это действительно процесс Chrome."""
+    if os.name == "nt":
+        lock = os.path.join(profile_dir, "lockfile")
+        if os.path.exists(lock):
+            try:
+                os.remove(lock)
+                log.info("Удалён протухший lockfile профиля Chrome")
+            except OSError:
+                raise RuntimeError(
+                    "Профиль Chrome уже используется другим окном. "
+                    "Закрой все окна Chrome, где открыт claude.ai с этим "
+                    "профилем, и попробуй ещё раз."
+                )
+        return
+
+    lock = os.path.join(profile_dir, "SingletonLock")
+    if os.path.lexists(lock):
+        pid = None
+        try:
+            # target: "hostname-pid"; hostname не сверяем — на macOS он
+            # меняется при смене сети, ложный «протухший» тут опаснее.
+            pid_s = os.readlink(lock).rpartition("-")[2]
+            if pid_s.isdigit():
+                pid = int(pid_s)
+        except OSError:
+            pass
+        if pid is not None and _chrome_pid_alive(pid):
+            raise RuntimeError(
+                f"Профиль Chrome уже используется другим окном (pid {pid}). "
+                "Закрой все окна Chrome, где открыт claude.ai с этим "
+                "профилем, и попробуй ещё раз."
+            )
+    # Лока нет или он протух (краш/чужой pid) — убираем все Singleton-файлы.
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        path = os.path.join(profile_dir, name)
+        try:
+            if os.path.lexists(path):
+                os.remove(path)
+                log.info("Удалён протухший %s профиля Chrome", name)
+        except OSError as e:
+            log.warning("Не смог удалить %s: %s", path, e)
 
 # Selectors (in order of preference)
 INPUT_SELECTORS = [
@@ -55,19 +143,7 @@ class ClaudeAutomation:
         self._pw = await async_playwright().start()
 
         os.makedirs(CHROME_PROFILE, exist_ok=True)
-        # Если другой Chrome уже использует этот профиль — на диске лежит
-        # SingletonLock / lockfile. Запускать второй экземпляр поверх — плохая
-        # идея: либо упадёт через несколько секунд, либо обе сессии полезут на
-        # claude.ai одновременно и это выглядит как два параллельных юзера.
-        for lock_name in ("SingletonLock", "lockfile", "SingletonCookie"):
-            lock_path = os.path.join(CHROME_PROFILE, lock_name)
-            if os.path.exists(lock_path):
-                raise RuntimeError(
-                    "Профиль Chrome уже используется другим окном. "
-                    "Закрой все окна обычного Chrome где открыт claude.ai с этим "
-                    "профилем и попробуй ещё раз. Если уверен что Chrome закрыт — "
-                    f"удали файл {lock_path}"
-                )
+        _ensure_profile_not_locked(CHROME_PROFILE)
 
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=CHROME_PROFILE,
@@ -460,9 +536,9 @@ class ClaudeAutomation:
     async def _paste_text(self, text: str):
         """Copy text to clipboard and paste into the focused input."""
         pyperclip.copy(text)
-        await self.page.keyboard.press("Control+a")
+        await self.page.keyboard.press(f"{EDIT_MODIFIER}+a")
         await _human_pause(0.15, 0.4)
-        await self.page.keyboard.press("Control+v")
+        await self.page.keyboard.press(f"{EDIT_MODIFIER}+v")
         await _human_pause(0.5, 1.1)
 
     async def _upload_files(self, paths: list[str]):

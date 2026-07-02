@@ -1058,9 +1058,15 @@ class Api:
         except Exception:
             pass
         try:
-            import winsound
-            winsound.MessageBeep(winsound.MB_ICONHAND if kind == "error"
-                                 else winsound.MB_ICONASTERISK)
+            if sys.platform == "darwin":
+                # macOS: winsound нет — играем системный звук через afplay.
+                import subprocess
+                snd = "Sosumi" if kind == "error" else "Glass"
+                subprocess.Popen(["afplay", f"/System/Library/Sounds/{snd}.aiff"])
+            else:
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONHAND if kind == "error"
+                                     else winsound.MB_ICONASTERISK)
         except Exception:
             pass
         try:

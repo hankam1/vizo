@@ -67,7 +67,7 @@ CHROME_PROFILE = os.path.join(USER_DATA_DIR, "chrome_profile")
 AUTH_STATE_FILE = os.path.join(USER_DATA_DIR, "claude_auth.json")
 
 # Version (used by updater)
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 GITHUB_REPO = "hankam1/vizo"
 
 VOICE_API_BASE = "https://voicer.mat3u.com/api/v1"

@@ -113,6 +113,9 @@ VEO_BASE = "https://veononstop.org/api/v1"
 | Первый ответ (подтверждение) сохраняется вместо сценария | Пользователь вводит своё сообщение вручную |
 | HTML entities в заголовке (`&#39;`) | `html.unescape()` |
 | Озвучка блокирует генерацию картинок | `asyncio.gather` + `run_in_executor` для синхронной функции |
+| macOS: промпт уходил пустым (Ctrl+V не вставляет в Chrome) | `EDIT_MODIFIER = Meta` на darwin, `Control` иначе (`claude_ui.py`) |
+| macOS: проверка «профиль Chrome занят» не работала (`SingletonLock` — висячий симлинк, `os.path.exists` его не видит) | `lexists` + проверка живости pid из симлинка; протухшие локи удаляются автоматически, ошибка только при живом Chrome |
+| macOS: нет звука уведомлений (`winsound` — Windows-only) | `afplay` системных звуков (Glass/Sosumi) на darwin |
 
 ---
 
