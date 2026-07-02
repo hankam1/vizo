@@ -195,6 +195,9 @@ class _Run:
         # Auto-retry bookkeeping (set from settings at creation).
         self.attempt = 1                  # 1 = first try; 2 = first auto-retry; ...
         self.retries_left = 0
+        # История между сессиями: когда завершился и восстановлен ли из файла.
+        self.finished_at = None           # isoformat либо None
+        self.restored = False             # True — загружен из run_history.json
 
     def public(self):
         """Plain dict pushed to JS (no thread/event/callable internals)."""
@@ -220,6 +223,8 @@ class _Run:
             "video_title": self.video_title,
             "cancelled_at_step": self.cancelled_at_step,
             "attempt": self.attempt,
+            "finished_at": self.finished_at,
+            "restored": self.restored,
         }
 
 
@@ -248,6 +253,8 @@ class Api:
         self._qlock = threading.RLock()
         self._batch_ids = set()               # runs since the queue was last idle (for the "done" notification)
         self._title_cache = {}                # url -> название ролика (для карточек очереди)
+        # История завершённых запусков переживает перезапуск приложения.
+        self._restore_history()
 
     def set_window(self, window):
         self._window = window
@@ -352,6 +359,10 @@ class Api:
             # Let the UI surface/open the report file.
             data.setdefault("report_path", report_path)
             data.setdefault("output_dir", run.output_dir or "")
+        # Завершённый запуск — в историю (переживает перезапуск приложения).
+        if event in ("done", "cancelled", "error"):
+            run.finished_at = datetime.now().isoformat(timespec="seconds")
+            self._save_history()
         # Reflect meaningful status changes in the queue list immediately.
         if event in self._QUEUE_REFRESH_EVENTS:
             self._emit_queue()
@@ -949,6 +960,115 @@ class Api:
             "position": self._queue_position(run.run_id),
         }
 
+    # --- История запусков (переживает перезапуск приложения) ---
+
+    _HISTORY_FILE = os.path.join(USER_DATA_DIR, "run_history.json")
+    _HISTORY_LIMIT = 100          # хранить не больше N завершённых запусков
+    _HISTORY_ARGS_MAX = 300_000   # не тащить в файл гигантские args (b64-картинки)
+    _TERMINAL = ("done", "error", "cancelled")
+
+    def _history_entry(self, run) -> dict:
+        """Сериализовать завершённый запуск для run_history.json.
+
+        args сохраняются, если они JSON-сериализуемы и компактны — тогда
+        «Возобновить» работает и после перезапуска приложения (fn восстановится
+        по kind). Трейсбек в файл не пишем: полный отчёт и так лежит в папке."""
+        import json as _json
+        e = run.public()
+        e.pop("pending_input", None)
+        if e.get("error"):
+            err = e["error"]
+            e["error"] = {"message": err.get("message"),
+                          "report_path": err.get("report_path"),
+                          "log_file": err.get("log_file")}
+        try:
+            args_json = _json.dumps(run.args, ensure_ascii=False)
+            if len(args_json) <= self._HISTORY_ARGS_MAX:
+                e["args"] = _json.loads(args_json)
+        except Exception:
+            pass
+        return e
+
+    def _save_history(self):
+        """Атомарно переписать run_history.json текущими завершёнными запусками.
+        Любая ошибка здесь не должна ломать пайплайн — история вторична."""
+        import json as _json
+        try:
+            with self._qlock:
+                entries = [self._history_entry(r) for r in self._runs.values()
+                           if r.status in self._TERMINAL]
+            entries = entries[-self._HISTORY_LIMIT:]
+            tmp = self._HISTORY_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                _json.dump(entries, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._HISTORY_FILE)
+        except Exception:
+            log.exception("Не смог сохранить историю запусков")
+
+    def _restore_history(self):
+        """Загрузить завершённые запуски прошлых сессий в реестр очереди.
+
+        fn восстанавливается по kind — поэтому «Возобновить» работает и для
+        восстановленных запусков (если args сохранились). Битый файл истории
+        молча пропускается: это кэш, а не данные."""
+        import json as _json
+        try:
+            if not os.path.exists(self._HISTORY_FILE):
+                return
+            with open(self._HISTORY_FILE, encoding="utf-8") as f:
+                data = _json.load(f)
+            if not isinstance(data, list):
+                return
+        except Exception:
+            log.exception("Не смог прочитать историю запусков")
+            return
+        fns = {
+            "scenario": self._pipeline_scenario,
+            "translate": self._pipeline_translate,
+            "preset": self._pipeline_preset,
+            "generation": self._pipeline_generation,
+        }
+        for e in data[-self._HISTORY_LIMIT:]:
+            try:
+                if not isinstance(e, dict) or e.get("status") not in self._TERMINAL:
+                    continue
+                args = e.get("args")
+                fn = fns.get(e.get("kind")) if isinstance(args, list) else None
+                self._run_id += 1
+                run = _Run(self._run_id, e.get("kind") or "scenario",
+                           e.get("title"), e.get("subtitle"), e.get("icon"),
+                           e.get("steps") or [], e.get("step_meta") or [],
+                           fn, tuple(args) if isinstance(args, list) else None)
+                run.status = e["status"]
+                run.step_text = e.get("step_text") or {
+                    "done": "Готово", "error": "Ошибка", "cancelled": "Отменено",
+                }[e["status"]]
+                run.percent = e.get("percent") or (100 if e["status"] == "done" else 0)
+                run.output_dir = e.get("output_dir")
+                run.folder_name = e.get("folder_name")
+                run.url = e.get("url")
+                run.scenario_id = e.get("scenario_id")
+                run.video_title = e.get("video_title")
+                run.error = e.get("error")
+                run.cancelled_at_step = e.get("cancelled_at_step")
+                run.finished_at = e.get("finished_at")
+                run.restored = True
+                self._runs[run.run_id] = run
+            except Exception:
+                continue
+
+    def clear_history(self):
+        """Убрать из списка все завершённые запуски (активные и очередь не трогаем)."""
+        with self._qlock:
+            for rid in [rid for rid, r in self._runs.items()
+                        if r.status in self._TERMINAL]:
+                self._runs.pop(rid, None)
+        self._save_history()
+        self._emit_queue()
+        return {"ok": True}
+
     def find_duplicate(self, url: str, scenario_id: str = None, language: str = None):
         """Есть ли уже запуск с этой же ссылкой В ТОМ ЖЕ пайплайне.
 
@@ -1246,6 +1366,8 @@ class Api:
                     pass
                 run.status = "cancelled"
                 run.step_text = "Отменён до запуска"
+                run.finished_at = datetime.now().isoformat(timespec="seconds")
+                self._save_history()
                 self._emit_queue()
                 return {"ok": True, "run_id": rid, "queued": True}
             is_active = (rid == self._active_run_id)
@@ -1282,10 +1404,12 @@ class Api:
                     pass
                 run.status = "cancelled"
                 run.step_text = "Убран из очереди"
+                run.finished_at = datetime.now().isoformat(timespec="seconds")
             elif run.status in ("done", "error", "cancelled"):
                 self._runs.pop(run_id, None)
             else:
                 return {"ok": False, "error": "Сначала отмени активный запуск"}
+        self._save_history()
         self._emit_queue()
         return {"ok": True}
 
@@ -1298,12 +1422,18 @@ class Api:
             old = self._runs.get(run_id)
             if old is None:
                 return {"ok": False, "error": "Запуск не найден"}
+            if old.fn is None or old.args is None:
+                # Восстановлен из истории без параметров (args были слишком
+                # большие или несериализуемые) — перезапустить нечем.
+                return {"ok": False, "error": "Для этого запуска из истории не "
+                        "сохранились параметры — запусти его заново вручную"}
             run = self._new_run(old.kind, old.title, old.subtitle, old.icon,
                                 list(old.steps), list(old.step_meta), old.fn, old.args)
             self._copy_run_identity(old, run)
             # Resuming replaces the old entry — remove it if it has finished.
             if old.status in ("done", "error", "cancelled"):
                 self._runs.pop(run_id, None)
+        self._save_history()
         return self._enqueue(run)
 
     def reorder_queue(self, ordered_ids: list):

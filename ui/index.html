@@ -2493,6 +2493,9 @@ audio { width: 100%; }
     </div>
     <div class="vab-title">Очередь</div>
     <div class="vab-side right">
+      <button class="vbtn icon" onclick="confirmClearHistory()" aria-label="Очистить историю" title="Очистить историю завершённых запусков">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>
       <button class="vbtn icon" onclick="openQueue()" aria-label="Обновить" title="Обновить">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 6.7 3L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-6.7-3L3 16"/><path d="M3 21v-5h5"/></svg>
       </button>
@@ -3108,6 +3111,30 @@ function renderQueue() {
   if (list) list.innerHTML = ordered.map(r => queueCardHtml(r, queued)).join('');
 }
 
+// «сегодня 22:15» / «29.06 14:03» — компактная метка завершения для карточек.
+function fmtWhen(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  if (d.toDateString() === new Date().toDateString()) return 'сегодня ' + hm;
+  return String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0') + ' ' + hm;
+}
+
+function confirmClearHistory() {
+  showModal(`<div class="vmodal">
+    <h3>Очистить историю?</h3>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:14px;">Завершённые запуски исчезнут из этого списка. Папки с результатами останутся на диске.</p>
+    <div class="vmodal-actions">
+      <button class="vbtn secondary" onclick="closeModal()">Отмена</button>
+      <button class="vbtn danger" id="clr-hist-btn">Очистить</button>
+    </div>
+  </div>`, () => {
+    const b = document.getElementById('clr-hist-btn');
+    if (b) b.onclick = async () => { closeModal(); if (api()) await api().clear_history(); openQueue(); };
+  });
+}
+
 function queueCardHtml(r, queued) {
   const isQueued = r.status === 'queued';
   const isActive = (r.status === 'running' || r.status === 'waiting_input');
@@ -3121,12 +3148,18 @@ function queueCardHtml(r, queued) {
     : escapeHtml(r.icon || '▶');
   // Подпись карточки: имя папки (выбрал пользователь) + название ролика
   // (подтянулось с YouTube) информативнее голой ссылки из subtitle.
+  // У завершённых — ещё и когда закончился (история живёт между сессиями).
   const subParts = [];
   if (r.folder_name) subParts.push(r.folder_name);
   if (r.video_title) subParts.push(r.video_title);
+  let subText = subParts.join(' · ') || r.subtitle || statusWord(r.status);
+  if (!isActive && !isQueued && r.finished_at) {
+    const when = fmtWhen(r.finished_at);
+    if (when) subText += ' · ' + when;
+  }
   const sub = isActive
     ? (escapeHtml(r.step_text || '') + (r.detail ? ' · ' + escapeHtml(r.detail) : ''))
-    : escapeHtml(subParts.join(' · ') || r.subtitle || statusWord(r.status));
+    : escapeHtml(subText);
   const bar = isActive ? `<div class="qcard-bar"><i style="width:${r.percent || 0}%"></i></div>` : '';
   let acts = '';
   if (isActive) {
