@@ -1613,13 +1613,17 @@ class Api:
         if run is not None and run.output_dir:
             os.makedirs(run.output_dir, exist_ok=True)
             return run.output_dir
-        # Имя, заданное пользователем при запуске, важнее автоимени: он его
-        # выбрал, чтобы не путать одинаковые пайплайны в очереди.
-        if run is not None and run.folder_name:
-            label = run.folder_name
         base = settings.load().get("output_dir") or settings.DEFAULT_OUTPUT_DIR
-        date = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        folder = os.path.join(base, f"{date}_{_safe_name(label + suffix)}")
+        # Имя, заданное пользователем при запуске, используется КАК ЕСТЬ, без
+        # префикса даты: он назвал папку сам, чтобы легко её найти. Дата
+        # добавляется только к автоименам.
+        custom = _safe_name(run.folder_name + suffix) if (
+            run is not None and run.folder_name) else ""
+        if custom:
+            folder = os.path.join(base, custom)
+        else:
+            date = datetime.now().strftime("%Y-%m-%d_%H-%M")
+            folder = os.path.join(base, f"{date}_{_safe_name(label + suffix)}")
         # Уникализируем: «отменил и сразу перезапустил» в ту же минуту не
         # должно смешивать файлы двух запусков в одной папке.
         if os.path.exists(folder):
