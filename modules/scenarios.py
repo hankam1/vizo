@@ -831,7 +831,10 @@ class ScenarioRunner:
                     log.info("Existing Claude browser is dead — restarting")
                     await self._close_claude()
                 self._claude = ClaudeAutomation()
-                await self._claude.start()
+                await self._claude.start(
+                    status_cb=lambda m: self.on_progress(
+                        idx, self._total_steps,
+                        step.get("name") or "Claude", m))
             # Always explicitly switch to a model (defaults to Opus 4.8 for legacy
             # scenarios without an explicit `model` field). Belt-and-suspenders:
             # we'd rather click-through every time than trust the browser's

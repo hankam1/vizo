@@ -5099,6 +5099,12 @@ window.onPyEvent = function(event, data) {
     toast(data.ok ? 'Claude привязан' : ('Ошибка: ' + data.error), data.ok ? 'success' : 'error');
     return;
   }
+  if (event === 'claude_link_status') {
+    // Статус запуска браузера при привязке (например, докачка Chromium,
+    // когда на машине нет ни Chrome, ни Edge).
+    toast(data.message || '');
+    return;
+  }
   if (event === 'voice_test_done') {
     const audio = document.getElementById('voice-test-audio');
     audio.src = 'file:///' + (data.path || '').replace(/\\/g, '/');

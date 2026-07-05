@@ -527,7 +527,8 @@ class Api:
                 # page URL) instead of reading stdin — so reaching the end means
                 # linking succeeded. The persistent Chrome profile keeps the
                 # session for later runs.
-                await claude.start()
+                await claude.start(status_cb=lambda m: self._emit(
+                    "claude_link_status", {"message": m}))
             finally:
                 await claude.close()
 
@@ -1816,7 +1817,7 @@ class Api:
             self._progress("Запускаю Claude...", 18, 2)
             claude = ClaudeAutomation()
             try:
-                await claude.start()
+                await claude.start(status_cb=lambda m: self._progress(m, 18, 2))
                 check_cancel()
                 self._progress(f"Перевожу на {language}...", 30, 3)
                 translated = await claude.run_translate(transcript, language,
@@ -1892,7 +1893,7 @@ class Api:
         self._progress("Запускаю Claude...", 12, 2)
         claude = ClaudeAutomation()
         try:
-            await claude.start()
+            await claude.start(status_cb=lambda m: self._progress(m, 12, 2))
             check_cancel()
 
             # Custom tartaria flow with UI-based reply

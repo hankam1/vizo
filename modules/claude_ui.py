@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import re
 import subprocess
 import sys
 import pyperclip
@@ -110,6 +111,68 @@ def _ensure_profile_not_locked(profile_dir: str):
         except OSError as e:
             log.warning("Не смог удалить %s: %s", path, e)
 
+def _is_browser_missing(err: BaseException) -> bool:
+    """Похоже ли исключение Playwright на «браузер не установлен».
+
+    Такие ошибки — повод попробовать следующий браузер из цепочки, а не
+    падать. Любые другие ошибки запуска (занятый профиль, битые аргументы)
+    пробрасываются как есть."""
+    s = str(err)
+    return ("playwright install" in s
+            or "is not found at" in s
+            or "Executable doesn't exist" in s)
+
+
+def _download_bundled_chromium(say):
+    """Скачать Chromium средствами Playwright-драйвера (~150 МБ, один раз).
+
+    Вызывается, только если на машине нет ни Google Chrome, ни Microsoft
+    Edge. Браузер кладётся в стандартный кэш Playwright (Windows:
+    %LOCALAPPDATA%\\ms-playwright), поэтому переустановка или обновление
+    vizo его не затирает и повторной закачки не будет.
+
+    Блокирующая (subprocess.Popen + чтение stdout) — звать через
+    asyncio.to_thread, иначе застынет event loop и с ним отмена/прогресс."""
+    from playwright._impl._driver import compute_driver_executable, get_driver_env
+    node, cli = compute_driver_executable()
+    say("Chrome и Edge не найдены — скачиваю Chromium (~150 МБ, один раз)…")
+    popen_kwargs = {}
+    if os.name == "nt":
+        # GUI-сборка без консоли: без флага у пользователя мигнёт чёрное окно.
+        popen_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    # --no-shell: не тащить headless-shell — мы запускаемся только headed,
+    # а это минус ~половина объёма закачки.
+    proc = subprocess.Popen(
+        [str(node), str(cli), "install", "chromium", "--no-shell"],
+        env=get_driver_env(),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        **popen_kwargs)
+    out = b""
+    last_milestone = 0
+    while True:
+        # read1 — вернуть сколько есть, не ждать полного буфера: прогресс
+        # драйвер рисует через \r без переводов строки, readline() бы завис.
+        chunk = proc.stdout.read1(4096)
+        if not chunk:
+            break
+        out += chunk
+        for m in re.finditer(rb"(\d{1,3})%", chunk):
+            pct = min(int(m.group(1)), 100)
+            milestone = pct - pct % 20
+            if milestone > last_milestone and pct < 100:
+                last_milestone = milestone
+                say(f"Скачиваю Chromium… {pct}%")
+    rc = proc.wait()
+    if rc != 0:
+        tail = out.decode("utf-8", "replace").strip().splitlines()[-5:]
+        log.error("playwright install chromium failed (rc=%s): %s", rc, tail)
+        raise RuntimeError(
+            "На компьютере нет ни Google Chrome, ни Microsoft Edge, а "
+            "скачать встроенный Chromium не получилось (проверь интернет "
+            "и место на диске). Детали: " + " | ".join(tail))
+    say("Chromium скачан")
+
+
 # Selectors (in order of preference)
 INPUT_SELECTORS = [
     'div[contenteditable="true"][data-placeholder]',
@@ -139,15 +202,22 @@ class ClaudeAutomation:
     # Startup / shutdown
     # ------------------------------------------------------------------
 
-    async def start(self):
+    async def start(self, status_cb=None):
+        def say(msg: str):
+            log.info(msg)
+            if status_cb:
+                try:
+                    status_cb(msg)
+                except Exception:
+                    pass
+
         self._pw = await async_playwright().start()
 
         os.makedirs(CHROME_PROFILE, exist_ok=True)
         _ensure_profile_not_locked(CHROME_PROFILE)
 
-        self._context = await self._pw.chromium.launch_persistent_context(
+        launch_kwargs = dict(
             user_data_dir=CHROME_PROFILE,
-            channel="chrome",
             headless=False,
             args=[
                 "--disable-blink-features=AutomationControlled",
@@ -157,6 +227,30 @@ class ClaudeAutomation:
             ignore_default_args=["--enable-automation"],
             viewport={"width": 1280, "height": 900},
         )
+
+        # Цепочка браузеров: системный Chrome → системный Edge (Chromium,
+        # предустановлен почти на любой Windows) → Chromium самого Playwright
+        # (докачивается при первом запуске). Раньше требовался строго Chrome —
+        # у пользователей без него всё падало с «Run playwright install chrome».
+        # Профиль один на всех: это одинаковый формат Chromium, а смена
+        # флавора на конкретной машине — редкость (появился/пропал Chrome).
+        for channel in ("chrome", "msedge", None):
+            kwargs = dict(launch_kwargs)
+            if channel:
+                kwargs["channel"] = channel
+            try:
+                self._context = await self._pw.chromium.launch_persistent_context(**kwargs)
+                break
+            except Exception as e:
+                if not _is_browser_missing(e):
+                    raise
+                if channel is not None:
+                    log.info("Браузер '%s' не найден — пробую следующий", channel)
+                    continue
+                # Встроенный Chromium ещё не скачан — качаем и пробуем снова.
+                await asyncio.to_thread(_download_bundled_chromium, say)
+                self._context = await self._pw.chromium.launch_persistent_context(**kwargs)
+                break
 
         await asyncio.sleep(2)
         pages = self._context.pages
