@@ -4168,15 +4168,21 @@ function renderNode(step, idx) {
   `;
 }
 
-const CLAUDE_MODELS = ['Opus 4.8', 'Sonnet 4.6', 'Haiku 4.5'];
-// effort_key → метка в UI. xhigh ("Extra") доступен только у Opus, у Haiku
+// Opus первым — он остаётся дефолтом для шагов без явной модели.
+const CLAUDE_MODELS = ['Opus 4.8', 'Sonnet 5', 'Haiku 4.5', 'Fable 5'];
+// Устаревшие имена из сохранённых сценариев → актуальный пункт меню claude.ai.
+// Дублирует MODEL_ALIASES в scenarios.py: раннер мапит при выполнении, здесь
+// мапим при отрисовке, чтобы селект показывал то, что реально запустится.
+const CLAUDE_MODEL_ALIASES = { 'Opus 4.7': 'Opus 4.8', 'Opus 4.6': 'Opus 4.8',
+                               'Sonnet 4.6': 'Sonnet 5', 'Sonnet 4.5': 'Sonnet 5' };
+// effort_key → метка в UI. xhigh ("Extra") есть у Fable/Opus/Sonnet; у Haiku
 // настройка effort вообще игнорируется (нет trigger в подменю).
 const CLAUDE_EFFORTS = [
   { key: '',       label: '— не менять —' },
   { key: 'low',    label: 'Low' },
   { key: 'medium', label: 'Medium' },
   { key: 'high',   label: 'High' },
-  { key: 'xhigh',  label: 'Extra (только Opus)' },
+  { key: 'xhigh',  label: 'Extra' },
   { key: 'max',    label: 'Max' },
 ];
 
@@ -4192,7 +4198,7 @@ function renderBody(step, idx) {
     <div class="vfield-hint">Своё имя помогает различать одинаковые типы (например 3 «Отправить промпт»). Пусто — используется тип шага.</div>
   </div>`);
   if (step.type === 'claude_open') {
-    const cur = step.model || CLAUDE_MODELS[0];
+    const cur = CLAUDE_MODEL_ALIASES[step.model] || step.model || CLAUDE_MODELS[0];
     const curEffort = step.effort || '';
     fields.push(`<div class="vfield">
       <label class="vfield-label">Модель Claude</label>
@@ -4206,7 +4212,7 @@ function renderBody(step, idx) {
       <select class="vselect" onchange="updateStep(${idx}, 'effort', this.value)">
         ${CLAUDE_EFFORTS.map(e => `<option value="${escapeHtml(e.key)}" ${curEffort === e.key ? 'selected' : ''}>${escapeHtml(e.label)}</option>`).join('')}
       </select>
-      <div class="vfield-hint">Глубина мышления. У Haiku настройка игнорируется — там единственный режим. Extra доступна только у Opus.</div>
+      <div class="vfield-hint">Глубина мышления. У Haiku настройка игнорируется — там единственный режим. Extra доступна у Fable, Opus и Sonnet.</div>
     </div>`);
   }
   if (step.type === 'claude_prompt') {

@@ -843,7 +843,8 @@ class ScenarioRunner:
             model = (step.get("model") or "Opus 4.8").strip()
             # Маппинг устаревших имён — после обновлений Claude UI они исчезают
             # из дропдауна. Без алиаса set_model_and_effort молча не найдёт пункт.
-            MODEL_ALIASES = {"Opus 4.7": "Opus 4.8", "Opus 4.6": "Opus 4.8"}
+            MODEL_ALIASES = {"Opus 4.7": "Opus 4.8", "Opus 4.6": "Opus 4.8",
+                             "Sonnet 4.6": "Sonnet 5", "Sonnet 4.5": "Sonnet 5"}
             model = MODEL_ALIASES.get(model, model)
             effort = (step.get("effort") or "").strip().lower() or None
             try:

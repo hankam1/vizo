@@ -373,9 +373,13 @@ class ClaudeAutomation:
     # ------------------------------------------------------------------
 
     # Display names of supported models (matches dropdown text in claude.ai UI).
-    SUPPORTED_MODELS = ["Opus 4.8", "Sonnet 4.6", "Haiku 4.5"]
+    # Состав меню на июль 2026 (проверено dom-dump'ом): Fable 5, Opus 4.8,
+    # Sonnet 5, Haiku 4.5. Sonnet 4.6 из меню исчез — алиас в scenarios.py
+    # мапит его на Sonnet 5 для старых сценариев.
+    SUPPORTED_MODELS = ["Fable 5", "Opus 4.8", "Sonnet 5", "Haiku 4.5"]
     # Effort keys (data-testid suffixes) → отображаемый текст в подменю.
-    # xhigh ("Extra") доступен только у Opus. У Haiku effort не настраивается.
+    # xhigh ("Extra") есть у Fable 5, Opus 4.8 и Sonnet 5. У Haiku effort
+    # не настраивается вовсе (нет effort-menu-trigger).
     EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
 
     async def set_model_and_effort(self, model_name: str | None,
@@ -383,9 +387,11 @@ class ClaudeAutomation:
         """Switch the current chat to the specified model AND effort in one
         round-trip through the dropdown. Both parameters are optional.
 
-        model_name: "Opus 4.8" | "Sonnet 4.6" | "Haiku 4.5" | None (не менять)
+        model_name: "Fable 5" | "Opus 4.8" | "Sonnet 5" | "Haiku 4.5" | None
+                    (не менять)
         effort:     "low" | "medium" | "high" | "xhigh" | "max" | None
-                    (xhigh = "Extra", доступен только у Opus)
+                    (xhigh = "Extra"; есть у Fable/Opus/Sonnet, у Haiku
+                    effort не настраивается)
 
         Haiku не имеет настройки effort — параметр effort игнорируется.
         Возвращает True если хоть что-то применилось без ошибок.
@@ -404,7 +410,7 @@ class ClaudeAutomation:
         # не было открыто). Затем читаем актуальный aria-label кнопки.
         # На странице ровно один [data-testid="model-selector-dropdown"]
         # (проверено dom-dump'ом), его aria-label достоверный источник
-        # вида "Model: Sonnet 4.6 Medium".
+        # вида "Model: Sonnet 5 Medium".
         if not await self._open_model_menu():
             return False
         await asyncio.sleep(0.3)  # дать DOM настояться после открытия
@@ -415,8 +421,9 @@ class ClaudeAutomation:
 
         need_model = bool(model_name) and (cur_model != model_name)
         # При смене модели claude.ai сбрасывает effort на дефолт новой
-        # модели (Opus→High, Sonnet→Low, Haiku→Extended). Если меняем
-        # модель — effort выставляем заново, даже если формально совпадает.
+        # модели (Opus→High, Fable/Sonnet 5→Medium, Haiku→Extended). Если
+        # меняем модель — effort выставляем заново, даже если формально
+        # совпадает.
         need_effort = bool(level) and (need_model or cur_effort != level)
         if not need_model and not need_effort:
             log.info("Модель/effort уже '%s' — пропускаю переключение", current_label)
