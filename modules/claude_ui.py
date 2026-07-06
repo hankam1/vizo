@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import random
 import re
@@ -643,13 +644,59 @@ class ClaudeAutomation:
         raise RuntimeError("Не найдено поле ввода Claude")
 
     async def _input_is_focused(self, input_el) -> bool:
-        """True, если фокус сейчас внутри contenteditable-редактора."""
+        """True, если фокус сейчас внутри contenteditable-редактора.
+
+        Устойчива к протухшему handle: ProseMirror перерисовывает DOM, и
+        отвязанный элемент «не содержит» activeElement, хотя фокус на месте.
+        Тогда спрашиваем страницу напрямую."""
         try:
-            return bool(await input_el.evaluate(
-                "el => el === document.activeElement"
-                " || el.contains(document.activeElement)"))
+            if input_el is not None and await input_el.evaluate("el => el.isConnected"):
+                return bool(await input_el.evaluate(
+                    "el => el === document.activeElement"
+                    " || el.contains(document.activeElement)"))
         except Exception:
-            return False
+            pass
+        return bool(await self._safe_eval(
+            """() => {
+                const ae = document.activeElement;
+                return !!(ae && ae.closest
+                          && ae.closest('div[contenteditable="true"]'));
+            }""", default=False))
+
+    async def _editor_contains(self, text: str) -> bool:
+        """Есть ли начало `text` в ЖИВОМ редакторе (по DOM страницы, а не по
+        возможно-протухшему handle). Сравниваем без пробелов: ProseMirror
+        режет текст на параграфы и переносы в textContent не совпадают."""
+        probe = re.sub(r"\s+", "", text)[:60]
+        if not probe:
+            return True
+        script = """
+            () => {
+                const probe = %s;
+                const eds = document.querySelectorAll(
+                    'div.ProseMirror, div[contenteditable="true"]');
+                for (const el of eds) {
+                    if ((el.textContent || '').replace(/\\s+/g, '').includes(probe))
+                        return true;
+                }
+                return false;
+            }
+        """ % json.dumps(probe)
+        return bool(await self._safe_eval(script, default=False))
+
+    async def _composer_chip_count(self) -> int:
+        """Число чипов-вложений в композере (файлы и «pasted content»).
+
+        Длинную вставку claude.ai конвертирует в чип «pasted content» — текст
+        редактора при этом остаётся пустым, но промпт УЙДЁТ вместе с
+        сообщением. Проверка вставки обязана считать это успехом."""
+        n = await self._safe_eval(
+            """() => Math.max(
+                 document.querySelectorAll('[data-testid="file-thumbnail"]').length,
+                 document.querySelectorAll('[data-testid*="attachment"]').length,
+                 document.querySelectorAll('button[aria-label="Remove from chat"]').length
+               )""", default=0)
+        return int(n or 0)
 
     async def _dismiss_composer_banners(self):
         """Закрыть баннеры claude.ai в районе поля ввода (например «Notify» —
@@ -684,13 +731,20 @@ class ClaudeAutomation:
         except Exception as e:
             log.debug("dismiss_composer_banners failed: %s", e)
 
-    async def _paste_text(self, text: str, input_el=None):
+    async def _paste_text(self, text: str, input_el=None, chip_baseline: int = 0):
         """Copy text to clipboard and paste into the focused input.
 
         Вызывать только когда фокус гарантированно в редакторе (send_message
         это проверяет): Ctrl+A вне редактора выделяет весь чат синим, а
         последующий Enter открывает случайное меню — ровно так у пользователя
-        «завис» пайплайн при появлении баннера «Notify»."""
+        «завис» пайплайн при появлении баннера «Notify».
+
+        Верификация — по ЖИВОМУ DOM, а не по input_el: ProseMirror
+        перерисовывает редактор, старый handle отвязывается, и его
+        textContent пуст даже когда текст на экране (из-за этого v1.2.5
+        вставляла промпт дважды и падала с ложной ошибкой). Успех — это и
+        чип «pasted content»: длинную вставку claude.ai конвертирует во
+        вложение, текст редактора пуст, но промпт уйдёт с сообщением."""
         for attempt in range(2):
             pyperclip.copy(text)
             await self.page.keyboard.press(f"{EDIT_MODIFIER}+a")
@@ -699,20 +753,26 @@ class ClaudeAutomation:
             await _human_pause(0.5, 1.1)
             if input_el is None:
                 return
-            # Вставка могла молча не пройти (промпт уходил пустым) — ждём,
-            # пока ProseMirror отрисует текст; длинные тексты рендерятся не
-            # мгновенно.
+            # Длинные тексты ProseMirror рендерит не мгновенно — опрашиваем.
             for _ in range(6):
-                try:
-                    filled = await input_el.evaluate(
-                        "el => (el.textContent || '').trim().length")
-                except Exception:
-                    filled = 0
-                if filled > 0:
+                if await self._editor_contains(text):
+                    return
+                if await self._composer_chip_count() > chip_baseline:
+                    log.info("Вставка ушла чипом «pasted content» — это успех")
                     return
                 await asyncio.sleep(0.4)
             log.warning("Вставка не дала текста в редакторе (попытка %d/2)",
                         attempt + 1)
+            # Перед повтором — СВЕЖИЙ handle и подтверждённый фокус: слепой
+            # Ctrl+V при фокусе вне редактора уходит в глобальный
+            # paste-хендлер claude.ai и ДОБАВЛЯЕТ второй экземпляр промпта.
+            try:
+                input_el = await self._get_input()
+                await input_el.click(timeout=5_000)
+            except Exception as e:
+                log.warning("Не смог перефокусировать редактор для повтора: %s", e)
+            if not await self._input_is_focused(input_el):
+                break
         raise RuntimeError(
             "Текст промпта не вставился в поле ввода Claude — вставка из "
             "буфера обмена не сработала. Попробуй запустить шаг ещё раз.")
@@ -803,6 +863,13 @@ class ClaudeAutomation:
         # (так пайплайн «завис» при появлении баннера «Notify» у поля ввода).
         focused = False
         for attempt in range(4):
+            if attempt:
+                # Свежий handle: ProseMirror мог перерисоваться, и старый
+                # элемент отвязался — клики по нему падают вечно.
+                try:
+                    input_el = await self._get_input()
+                except Exception:
+                    pass
             await self._neutralize_overlays()
             await self._dismiss_composer_banners()
             try:
@@ -832,7 +899,8 @@ class ClaudeAutomation:
                 "попап или баннер (например «Notify»). Закрой лишние попапы в "
                 "окне браузера и запусти шаг ещё раз."
             )
-        await self._paste_text(text, input_el)
+        chips_before = await self._composer_chip_count()
+        await self._paste_text(text, input_el, chips_before)
 
         # Перед отправкой — пауза «как будто читаем перед Send».
         # Длинные сообщения занимают чуть больше времени на «review».
@@ -850,7 +918,9 @@ class ClaudeAutomation:
             try:
                 await input_el.click(timeout=5_000)
             except Exception:
-                await input_el.evaluate("el => el.focus()")
+                # handle мог протухнуть после перерисовки ProseMirror
+                input_el = await self._get_input()
+                await input_el.click(timeout=5_000)
             if not await self._input_is_focused(input_el):
                 raise RuntimeError(
                     "Фокус ушёл из поля ввода Claude перед отправкой — "
