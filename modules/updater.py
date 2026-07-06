@@ -58,13 +58,80 @@ def _pick_asset(assets: list) -> dict | None:
     return exes[0]
 
 
+def _latest_tag_via_redirect() -> str | None:
+    """Тег последнего релиза БЕЗ GitHub API.
+
+    api.github.com без токена — 60 запросов/час НА IP-АДРЕС; за CGNAT
+    (мобильный интернет) этот лимит общий на всех абонентов провайдера,
+    поэтому у пользователей выскакивало «403 rate limit exceeded». Обычная
+    веб-страница /releases/latest не лимитируется: тег читаем из редиректа."""
+    r = requests.get(f"https://github.com/{GITHUB_REPO}/releases/latest",
+                     timeout=10, allow_redirects=False)
+    m = re.search(r"/releases/tag/([^/?#]+)", r.headers.get("Location") or "")
+    return m.group(1) if m else None
+
+
+def _asset_download_url(tag: str) -> str:
+    """Прямая ссылка на ассет релиза — имена ассетов фиксированы CI-сборкой
+    (vizo.exe, vizo-mac-apple-silicon.dmg, vizo-mac-intel.dmg)."""
+    base = f"https://github.com/{GITHUB_REPO}/releases/download/{tag}"
+    if sys.platform == "darwin":
+        import platform
+        machine = platform.machine().lower()
+        is_arm = ("arm" in machine) or ("aarch64" in machine)
+        return f"{base}/" + ("vizo-mac-apple-silicon.dmg" if is_arm
+                             else "vizo-mac-intel.dmg")
+    return f"{base}/{EXPECTED_ASSET_NAME}"
+
+
 def check_for_updates() -> dict:
-    """Query GitHub for latest release. Returns {available, version, download_url, notes}."""
+    """Query GitHub for latest release. Returns {available, version, download_url, notes}.
+
+    Сначала веб-редирект (без rate limit), API — только фолбэк и источник
+    release notes: его отказ (403 и пр.) не должен ломать проверку."""
+    try:
+        tag = _latest_tag_via_redirect()
+    except Exception:
+        tag = None
+
+    if tag:
+        latest = tag.lstrip("vV")
+        if _version_tuple(latest) <= _version_tuple(VERSION):
+            return {"available": False, "current_version": VERSION}
+        result = {
+            "available": True,
+            "version": latest,
+            "download_url": _asset_download_url(tag),
+            "notes": "",
+            "current_version": VERSION,
+        }
+        # Release notes и точный URL ассета — бонус из API; без него тоже ок.
+        try:
+            r = requests.get(
+                f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                timeout=10, headers={"Accept": "application/vnd.github+json"})
+            if r.ok:
+                data = r.json()
+                result["notes"] = (data.get("body") or "")[:500]
+                asset = _pick_asset(data.get("assets", []))
+                if asset:
+                    result["download_url"] = asset["browser_download_url"]
+        except Exception:
+            pass
+        return result
+
+    # Редирект не сработал (экзотический прокси и т.п.) — путь через API.
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
         r = requests.get(url, timeout=10, headers={"Accept": "application/vnd.github+json"})
         if r.status_code == 404:
             return {"available": False, "current_version": VERSION}
+        if r.status_code == 403 and "rate limit" in (r.text or "").lower():
+            return {"available": False, "current_version": VERSION,
+                    "error": "GitHub временно ограничил проверки с этого "
+                             "IP-адреса (общий лимит). Попробуй через час — "
+                             "или скачай обновление вручную со страницы "
+                             f"github.com/{GITHUB_REPO}/releases"}
         r.raise_for_status()
         data = r.json()
         latest = data["tag_name"].lstrip("v")
@@ -280,7 +347,14 @@ def _apply_macos(download_url: str) -> dict:
 
 
 def cleanup_old_exe():
-    """Remove the .old leftover from a previous update. Call on app startup."""
+    """Remove the .old leftover from a previous update. Call on app startup.
+
+    Сразу после обновления старый процесс ещё завершается и держит образ
+    своего exe — одна мгновенная попытка удаления проигрывает эту гонку,
+    и .old оставался лежать до следующего запуска. Лежащий рядом
+    переименованный самообновлявшийся exe — красная тряпка для
+    поведенческих эвристик антивирусов (Kaspersky PDM метил его как
+    Trojan.Win32.Generic). Поэтому ретраим удаление в фоне ~60 секунд."""
     if not IS_FROZEN:
         return
     if sys.platform == "darwin":
@@ -290,8 +364,16 @@ def cleanup_old_exe():
             shutil.rmtree(old, ignore_errors=True)
         return
     old_path = INSTALL_EXE + ".old"
-    if os.path.exists(old_path):
-        try:
-            os.remove(old_path)
-        except Exception:
-            pass
+    if not os.path.exists(old_path):
+        return
+
+    def _retry_remove():
+        for _ in range(60):
+            try:
+                os.remove(old_path)
+                return
+            except OSError:
+                time.sleep(1.0)
+
+    import threading
+    threading.Thread(target=_retry_remove, daemon=True, name="old-exe-cleanup").start()
