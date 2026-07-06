@@ -223,6 +223,10 @@ class ClaudeAutomation:
                 "--disable-blink-features=AutomationControlled",
                 "--no-first-run",
                 "--no-default-browser-check",
+                # Авто-отказ на запросы разрешений (уведомления и т.п.) —
+                # claude.ai предлагает «Notify», клик по такому попапу вешал
+                # пайплайн, а разрешения автоматизации всё равно не нужны.
+                "--deny-permission-prompts",
             ],
             ignore_default_args=["--enable-automation"],
             viewport={"width": 1280, "height": 900},
@@ -638,13 +642,80 @@ class ClaudeAutomation:
                 continue
         raise RuntimeError("Не найдено поле ввода Claude")
 
-    async def _paste_text(self, text: str):
-        """Copy text to clipboard and paste into the focused input."""
-        pyperclip.copy(text)
-        await self.page.keyboard.press(f"{EDIT_MODIFIER}+a")
-        await _human_pause(0.15, 0.4)
-        await self.page.keyboard.press(f"{EDIT_MODIFIER}+v")
-        await _human_pause(0.5, 1.1)
+    async def _input_is_focused(self, input_el) -> bool:
+        """True, если фокус сейчас внутри contenteditable-редактора."""
+        try:
+            return bool(await input_el.evaluate(
+                "el => el === document.activeElement"
+                " || el.contains(document.activeElement)"))
+        except Exception:
+            return False
+
+    async def _dismiss_composer_banners(self):
+        """Закрыть баннеры claude.ai в районе поля ввода (например «Notify» —
+        предложение включить уведомления о готовом ответе, июль 2026).
+
+        Такой баннер перехватывает клик по полю ввода: фокус не попадает в
+        редактор, Ctrl+A выделяет весь чат, а Enter открывает меню «+» —
+        пайплайн замирает. Best-effort: жмём только маленькие кнопки закрытия
+        с подходящим aria-label в нижней половине экрана. Кнопки удаления
+        вложений («Remove from chat») сюда не попадают — их label не матчится."""
+        try:
+            n = await self.page.evaluate(
+                """
+                () => {
+                    const rx = /dismiss|close|not now|no thanks|got it/i;
+                    let n = 0;
+                    for (const b of document.querySelectorAll('button[aria-label]')) {
+                        const label = b.getAttribute('aria-label') || '';
+                        if (!rx.test(label) || /remove/i.test(label)) continue;
+                        const r = b.getBoundingClientRect();
+                        if (!r.width || r.width > 60 || r.height > 60) continue;
+                        if (r.bottom < window.innerHeight * 0.5) continue;
+                        b.click(); n++;
+                    }
+                    return n;
+                }
+                """
+            )
+            if n:
+                log.info("Закрыто %d баннеров у поля ввода", n)
+                await asyncio.sleep(0.4)
+        except Exception as e:
+            log.debug("dismiss_composer_banners failed: %s", e)
+
+    async def _paste_text(self, text: str, input_el=None):
+        """Copy text to clipboard and paste into the focused input.
+
+        Вызывать только когда фокус гарантированно в редакторе (send_message
+        это проверяет): Ctrl+A вне редактора выделяет весь чат синим, а
+        последующий Enter открывает случайное меню — ровно так у пользователя
+        «завис» пайплайн при появлении баннера «Notify»."""
+        for attempt in range(2):
+            pyperclip.copy(text)
+            await self.page.keyboard.press(f"{EDIT_MODIFIER}+a")
+            await _human_pause(0.15, 0.4)
+            await self.page.keyboard.press(f"{EDIT_MODIFIER}+v")
+            await _human_pause(0.5, 1.1)
+            if input_el is None:
+                return
+            # Вставка могла молча не пройти (промпт уходил пустым) — ждём,
+            # пока ProseMirror отрисует текст; длинные тексты рендерятся не
+            # мгновенно.
+            for _ in range(6):
+                try:
+                    filled = await input_el.evaluate(
+                        "el => (el.textContent || '').trim().length")
+                except Exception:
+                    filled = 0
+                if filled > 0:
+                    return
+                await asyncio.sleep(0.4)
+            log.warning("Вставка не дала текста в редакторе (попытка %d/2)",
+                        attempt + 1)
+        raise RuntimeError(
+            "Текст промпта не вставился в поле ввода Claude — вставка из "
+            "буфера обмена не сработала. Попробуй запустить шаг ещё раз.")
 
     async def _upload_files(self, paths: list[str]):
         """Upload files via the hidden file input (works even if button not visible)."""
@@ -727,20 +798,41 @@ class ClaudeAutomation:
         # base-ui порталы claude.ai перекрывают страницу и перехватывают
         # клики (та же болезнь, что у кнопки copy в _last_response_text) —
         # без нейтрализации клик по полю ввода умирал по таймауту 30с.
-        await self._neutralize_overlays()
-        try:
-            await input_el.click(timeout=5_000)
-        except Exception as e:
-            log.warning("Клик по полю ввода не прошёл (%s) — force/JS-фолбэк", e)
+        # Клавиатуру шлём ТОЛЬКО убедившись, что фокус реально в редакторе:
+        # иначе Ctrl+A выделяет весь чат, а Enter открывает случайное меню
+        # (так пайплайн «завис» при появлении баннера «Notify» у поля ввода).
+        focused = False
+        for attempt in range(4):
             await self._neutralize_overlays()
+            await self._dismiss_composer_banners()
             try:
-                await input_el.click(timeout=5_000, force=True)
-            except Exception:
-                # Последний рубеж: программный фокус. ProseMirror после
-                # focus() принимает вставку с клавиатуры как после клика.
-                await input_el.evaluate("el => el.focus()")
-        await _human_pause(0.3, 0.7)
-        await self._paste_text(text)
+                await input_el.click(timeout=5_000)
+            except Exception as e:
+                log.warning("Клик по полю ввода не прошёл (%s) — force/JS-фолбэк", e)
+                try:
+                    await input_el.click(timeout=5_000, force=True)
+                except Exception:
+                    # Последний рубеж: программный фокус. ProseMirror после
+                    # focus() принимает вставку с клавиатуры как после клика.
+                    try:
+                        await input_el.evaluate("el => el.focus()")
+                    except Exception:
+                        pass
+            await _human_pause(0.3, 0.7)
+            focused = await self._input_is_focused(input_el)
+            if focused:
+                break
+            # Фокус съел попап/меню/баннер — закрываем и пробуем снова.
+            log.info("Фокус не в поле ввода (попытка %d/4) — Escape и повтор",
+                     attempt + 1)
+            await self._close_menus()
+        if not focused:
+            raise RuntimeError(
+                "Не удалось сфокусировать поле ввода Claude: клики перехватывает "
+                "попап или баннер (например «Notify»). Закрой лишние попапы в "
+                "окне браузера и запусти шаг ещё раз."
+            )
+        await self._paste_text(text, input_el)
 
         # Перед отправкой — пауза «как будто читаем перед Send».
         # Длинные сообщения занимают чуть больше времени на «review».
@@ -748,6 +840,21 @@ class ClaudeAutomation:
             await _human_pause(1.5, 3.0)
         else:
             await _human_pause(0.6, 1.4)
+        # Enter при открытом меню выбирает пункт меню, а не отправляет
+        # сообщение — если что-то всплыло за время паузы, закрываем и
+        # возвращаем фокус в редактор (Escape мог его сбросить).
+        if await self.page.locator('[role="menu"]').count() > 0:
+            log.info("Перед отправкой открыто постороннее меню — закрываю")
+            await self._close_menus()
+        if not await self._input_is_focused(input_el):
+            try:
+                await input_el.click(timeout=5_000)
+            except Exception:
+                await input_el.evaluate("el => el.focus()")
+            if not await self._input_is_focused(input_el):
+                raise RuntimeError(
+                    "Фокус ушёл из поля ввода Claude перед отправкой — "
+                    "сообщение не отправлено. Запусти шаг ещё раз.")
         await self.page.keyboard.press("Enter")
         await _human_pause(1.2, 2.0)
 
