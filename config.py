@@ -64,10 +64,14 @@ UI_DIR = os.path.join(RESOURCE_DIR, "ui")
 # Per-user data (writable)
 OUTPUT_DIR = os.path.join(USER_DATA_DIR, "output") if IS_FROZEN else os.path.join(BASE_DIR, "output")
 CHROME_PROFILE = os.path.join(USER_DATA_DIR, "chrome_profile")
+# Отдельный профиль для ChatGPT: persistent-контекст жёстко лочит профиль
+# одним инстансом Chrome, а в смешанном сценарии Claude и GPT открыты
+# одновременно — значит, каждому провайдеру свой профиль (и своё окно).
+GPT_CHROME_PROFILE = os.path.join(USER_DATA_DIR, "chrome_profile_gpt")
 AUTH_STATE_FILE = os.path.join(USER_DATA_DIR, "claude_auth.json")
 
 # Version (used by updater)
-VERSION = "1.2.7"
+VERSION = "1.3.0"
 GITHUB_REPO = "hankam1/vizo"
 
 VOICE_API_BASE = "https://voicer.mat3u.com/api/v1"

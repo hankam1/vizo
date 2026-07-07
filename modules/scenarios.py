@@ -334,6 +334,7 @@ NODE_OUTPUT_TYPE = {
     "yt_title": "text", "yt_desc": "text", "yt_transcript": "text",
     "yt_preview": "image",
     "claude_prompt": "text", "claude_ask": "text", "claude_chunked": "text",
+    "gpt_prompt": "text", "gpt_ask": "text", "gpt_chunked": "text",
     "save_txt": "text", "save_json": "text",
     "voice": "audio",
     "banana_one": "image", "banana_batch": "image",
@@ -341,27 +342,49 @@ NODE_OUTPUT_TYPE = {
     "video_comp": "video", "video_batch": "video",
 }
 
+# AI-провайдеры чатов. Типы шагов строятся как "{провайдер}_{действие}"
+# (claude_open, gpt_prompt, …) — сессии, валидация и resume-откат ведутся
+# по каждому провайдеру НЕЗАВИСИМО: в смешанном сценарии Claude и ChatGPT
+# открыты одновременно в двух отдельных окнах браузера.
+AI_PROVIDERS = ("claude", "gpt")
+AI_PROVIDER_LABEL = {"claude": "Claude", "gpt": "ChatGPT"}
+# Действия, живущие в контексте открытого чата (требуют «{provider}_open»).
+_AI_CHAT_ACTIONS = ("prompt", "ask", "chunked")
+
+
+def ai_step_provider(step_type: str) -> str | None:
+    """'gpt_prompt' → 'gpt'; None для шагов, не относящихся к AI-чатам."""
+    if not step_type or "_" not in step_type:
+        return None
+    p = step_type.split("_", 1)[0]
+    return p if p in AI_PROVIDERS else None
+
 
 def validate(scenario: dict) -> list:
     """Return list of error dicts: { step_index, message }."""
     errors = []
     steps = scenario.get("steps", [])
-    has_open_chat = False
+    # Открытые AI-чаты считаем ПО провайдерам: gpt_prompt после claude_open
+    # (без gpt_open) — ошибка, чаты не взаимозаменяемы.
+    open_chats = {p: False for p in AI_PROVIDERS}
     declared_vars = set()
 
     for idx, step in enumerate(steps):
         t = step.get("type")
-        # Claude session validation
-        if t == "claude_open":
-            has_open_chat = True
-        elif t in ("claude_prompt", "claude_ask", "claude_chunked"):
-            if not has_open_chat:
+        # AI chat session validation (per provider)
+        prov = ai_step_provider(t)
+        if prov:
+            action = t.split("_", 1)[1]
+            if action == "open":
+                open_chats[prov] = True
+            elif action in _AI_CHAT_ACTIONS and not open_chats[prov]:
                 errors.append({
                     "step_index": idx,
-                    "message": "Сначала добавь шаг «Открыть новый чат Claude»",
+                    "message": "Сначала добавь шаг «Открыть новый чат "
+                               f"{AI_PROVIDER_LABEL[prov]}»",
                 })
-        elif t == "claude_close":
-            has_open_chat = False
+            elif action == "close":
+                open_chats[prov] = False
 
         # Validate brace references {var} in templated fields.
         for field in ("prompt_template", "filename", "source"):
@@ -391,7 +414,7 @@ def validate(scenario: dict) -> list:
             declared_vars.add(step["output"])
 
         # Per-type required-field checks
-        if t == "claude_prompt" and not step.get("prompt_template"):
+        if t in ("claude_prompt", "gpt_prompt") and not step.get("prompt_template"):
             errors.append({
                 "step_index": idx,
                 "message": "Не указан шаблон промпта",
@@ -407,7 +430,7 @@ def validate(scenario: dict) -> list:
                     "step_index": idx,
                     "message": "Не указан источник текста (переменная)",
                 })
-        if t == "claude_chunked" and not step.get("source"):
+        if t in ("claude_chunked", "gpt_chunked") and not step.get("source"):
             errors.append({
                 "step_index": idx,
                 "message": "Не указан источник — переменная с оригиналом для нарезки",
@@ -476,8 +499,9 @@ class StepSkipped(Exception):
 
 class ScenarioRunner:
     """Executes a scenario step-by-step. Calls `on_progress(idx, total,
-    label, detail)` for each step. Calls `on_ask_user(message)` (async,
-    must return user reply) when an `ask_user` step runs.
+    label, detail)` for each step. Calls `on_ask_user(message, provider)`
+    (async, must return user reply) when a `claude_ask`/`gpt_ask` step runs —
+    `provider` ("claude" | "gpt") задаёт брендинг диалога в UI.
     """
 
     def __init__(self, scenario: dict, output_dir: str,
@@ -497,12 +521,14 @@ class ScenarioRunner:
         self.on_user_input = on_user_input
         self.vars = dict(starting_vars or {})
         self.vars["output_dir"] = output_dir
-        self._claude = None  # ClaudeAutomation instance for active chat
+        # Активные браузерные сессии AI-чатов по провайдерам:
+        # ClaudeAutomation / GPTAutomation с одинаковым интерфейсом.
+        self._ai_sessions: dict = {p: None for p in AI_PROVIDERS}
         self._current_idx = 0
         self._total_steps = 0
-        # Name of the variable that received the most recent Claude reply
-        # — used as default `show_var` for claude_ask steps.
-        self._last_claude_reply_var: Optional[str] = None
+        # Name of the variable that received the most recent reply per
+        # provider — used as default `show_var` for claude_ask/gpt_ask steps.
+        self._last_reply_var: dict = {p: None for p in AI_PROVIDERS}
         # threading.Event set from the outside (api_bridge) when the user
         # presses Cancel. Checked between steps and during long Claude waits.
         self._cancel_event = cancel_event
@@ -635,7 +661,7 @@ class ScenarioRunner:
                     done += len(batch)
                     self._write_checkpoint(batch_no + 1)
         finally:
-            await self._close_claude()
+            await self._close_all_ai()
         self._clear_checkpoint()  # успешный финиш — возобновлять нечего
         self.on_progress(total, total, "Готово")
         return self.vars
@@ -643,28 +669,42 @@ class ScenarioRunner:
     def _resume_start_batch(self, batches: list) -> int:
         """С какого батча продолжать по чекпоинту.
 
-        Нюанс Claude: шаги claude_prompt/claude_ask/claude_chunked живут в
-        контексте чата, открытого шагом claude_open. Если первый невыполненный
-        claude-шаг опирается на чат, открытый ДО точки возобновления, — чат
-        мёртв (браузер закрыт при падении), и надо откатиться к его
-        claude_open и переиграть диалог. Дорогая часть (озвучка, картинки)
-        после диалога всё равно пропускается по чекпоинту."""
+        Нюанс AI-чатов: шаги *_prompt/*_ask/*_chunked живут в контексте
+        чата, открытого шагом {provider}_open. Если первый невыполненный
+        чат-шаг провайдера опирается на чат, открытый ДО точки
+        возобновления, — чат мёртв (браузер закрыт при падении), и надо
+        откатиться к его *_open и переиграть диалог. Провайдеры (Claude,
+        ChatGPT) проверяются НЕЗАВИСИМО — берём самый ранний откат. Дорогая
+        часть (озвучка, картинки) после диалога всё равно пропускается по
+        чекпоинту."""
         want = self._resume_state.get("completed_batches") or 0
         start = max(0, min(int(want), len(batches)))
+        rollback = start
+        resolved = set()  # провайдеры, судьба которых уже ясна
         for b in batches[start:]:
             for _, s in b:
-                t = s.get("type")
-                if t == "claude_open":
-                    return start  # дальше чат откроется заново сам
-                if t in ("claude_prompt", "claude_ask", "claude_chunked"):
+                t = s.get("type") or ""
+                prov = ai_step_provider(t)
+                if not prov or prov in resolved:
+                    continue
+                action = t.split("_", 1)[1]
+                if action == "open":
+                    resolved.add(prov)  # дальше чат откроется заново сам
+                elif action in _AI_CHAT_ACTIONS:
+                    resolved.add(prov)
                     for bi in range(start - 1, -1, -1):
-                        if any(st.get("type") == "claude_open"
+                        if any(st.get("type") == f"{prov}_open"
                                for _, st in batches[bi]):
-                            log.info("Resume: откат с батча %d на %d — чат Claude "
-                                     "нужно переиграть", start, bi)
-                            return bi
-                    return 0
-        return start
+                            log.info("Resume: откат с батча %d на %d — чат %s "
+                                     "нужно переиграть", start, bi,
+                                     AI_PROVIDER_LABEL[prov])
+                            rollback = min(rollback, bi)
+                            break
+                    else:
+                        rollback = 0
+            if len(resolved) == len(AI_PROVIDERS):
+                break
+        return rollback
 
     def _write_checkpoint(self, completed_batches: int):
         """Атомарно сохранить прогресс в папку результата. Ошибки глотаем:
@@ -818,100 +858,123 @@ class ScenarioRunner:
             log.info("yt_preview: done in %.1fs", time.time() - t0)
             self._set_output(step, path)
 
-        elif t == "claude_open":
+        elif t in ("claude_open", "gpt_open"):
+            provider = ai_step_provider(t)
+            label = AI_PROVIDER_LABEL[provider]
             # Reuse the existing browser if it's still alive — restarting the
             # persistent Chrome context too quickly causes a lock race that
             # crashes the new instance a few seconds after launch.
-            from modules.claude_ui import ClaudeAutomation
-            if self._claude and self._claude.is_alive():
-                log.info("Reusing existing Claude browser for new chat")
-                await self._claude.new_chat()
+            sess = self._ai_sessions.get(provider)
+            if sess and sess.is_alive():
+                log.info("Reusing existing %s browser for new chat", label)
+                await sess.new_chat()
             else:
-                if self._claude:
-                    log.info("Existing Claude browser is dead — restarting")
-                    await self._close_claude()
-                self._claude = ClaudeAutomation()
-                await self._claude.start(
+                if sess:
+                    log.info("Existing %s browser is dead — restarting", label)
+                    await self._close_ai(provider)
+                sess = self._new_ai_session(provider)
+                self._ai_sessions[provider] = sess
+                await sess.start(
                     status_cb=lambda m: self.on_progress(
                         idx, self._total_steps,
-                        step.get("name") or "Claude", m))
-            # Always explicitly switch to a model (defaults to Opus 4.8 for legacy
-            # scenarios without an explicit `model` field). Belt-and-suspenders:
-            # we'd rather click-through every time than trust the browser's
-            # current default. Effort выставляется в том же проходе через UI
-            # (low|medium|high|xhigh|max). Если effort пустой — не трогаем.
-            model = (step.get("model") or "Opus 4.8").strip()
-            # Маппинг устаревших имён — после обновлений Claude UI они исчезают
-            # из дропдауна. Без алиаса set_model_and_effort молча не найдёт пункт.
-            MODEL_ALIASES = {"Opus 4.7": "Opus 4.8", "Opus 4.6": "Opus 4.8",
-                             "Sonnet 4.6": "Sonnet 5", "Sonnet 4.5": "Sonnet 5"}
-            model = MODEL_ALIASES.get(model, model)
-            effort = (step.get("effort") or "").strip().lower() or None
-            try:
-                ok = await self._claude.set_model_and_effort(model, effort)
-                if not ok:
-                    # Не падаем, но проблема серьёзная — без правильной
-                    # модели/effort пайплайн уйдёт в дефолт браузера. Поднимаем
-                    # explicit ошибку, чтобы UI показал её сразу.
-                    raise RuntimeError(
-                        f"Не удалось переключить Claude на {model}"
-                        + (f" / effort={effort}" if effort else "")
-                        + ". Проверь что в браузере открыт claude.ai/new (не login и не challenge), "
-                        "и повтори запуск."
-                    )
-            except RuntimeError:
-                raise
-            except Exception as e:
-                log.warning("Failed to switch model/effort '%s'/'%s': %s",
-                            model, effort, e)
+                        step.get("name") or label, m))
+            if provider == "claude":
+                # Always explicitly switch to a model (defaults to Opus 4.8 for legacy
+                # scenarios without an explicit `model` field). Belt-and-suspenders:
+                # we'd rather click-through every time than trust the browser's
+                # current default. Effort выставляется в том же проходе через UI
+                # (low|medium|high|xhigh|max). Если effort пустой — не трогаем.
+                model = (step.get("model") or "Opus 4.8").strip()
+                # Маппинг устаревших имён — после обновлений Claude UI они исчезают
+                # из дропдауна. Без алиаса set_model_and_effort молча не найдёт пункт.
+                MODEL_ALIASES = {"Opus 4.7": "Opus 4.8", "Opus 4.6": "Opus 4.8",
+                                 "Sonnet 4.6": "Sonnet 5", "Sonnet 4.5": "Sonnet 5"}
+                model = MODEL_ALIASES.get(model, model)
+                effort = (step.get("effort") or "").strip().lower() or None
+                try:
+                    ok = await sess.set_model_and_effort(model, effort)
+                    if not ok:
+                        # Не падаем, но проблема серьёзная — без правильной
+                        # модели/effort пайплайн уйдёт в дефолт браузера. Поднимаем
+                        # explicit ошибку, чтобы UI показал её сразу.
+                        raise RuntimeError(
+                            f"Не удалось переключить Claude на {model}"
+                            + (f" / effort={effort}" if effort else "")
+                            + ". Проверь что в браузере открыт claude.ai/new (не login и не challenge), "
+                            "и повтори запуск."
+                        )
+                except RuntimeError:
+                    raise
+                except Exception as e:
+                    log.warning("Failed to switch model/effort '%s'/'%s': %s",
+                                model, effort, e)
+            else:
+                # ChatGPT: модель по умолчанию пустая («как есть»). Выбор
+                # МЯГКИЙ: на бесплатном аккаунте пикера моделей нет вовсе —
+                # предупреждаем и едем дальше на дефолтной модели, hard-fail
+                # сделал бы сценарии неработоспособными без подписки.
+                model = (step.get("model") or "").strip()
+                if model:
+                    try:
+                        ok = await sess.set_model(model)
+                        if not ok:
+                            log.warning("Не удалось выбрать модель ChatGPT '%s' "
+                                        "— продолжаю на модели по умолчанию", model)
+                            self.on_progress(
+                                idx, self._total_steps, step.get("name") or label,
+                                f"Модель «{model}» недоступна (нет подписки?) — "
+                                "работаю на модели по умолчанию")
+                    except Exception as e:
+                        log.warning("Failed to switch GPT model '%s': %s", model, e)
 
-        elif t == "claude_close":
-            await self._close_claude()
+        elif t in ("claude_close", "gpt_close"):
+            await self._close_ai(ai_step_provider(t))
 
-        elif t == "claude_prompt":
-            if not self._claude:
-                raise RuntimeError("Нет открытого чата Claude. Добавь шаг «Открыть новый чат»")
+        elif t in ("claude_prompt", "gpt_prompt"):
+            provider = ai_step_provider(t)
+            sess = self._require_ai_session(provider)
             tpl = step.get("prompt_template", "")
             prompt = substitute(tpl, self.vars)
             file_paths = step.get("file_paths") or []
             file_paths = [substitute(p, self.vars) if isinstance(p, str) else p for p in file_paths]
             file_paths = [p for p in file_paths if p and os.path.exists(p)]
             timeout = int(step.get("timeout", 600))
-            await self._claude.send_message(prompt, file_paths or None)
-            reply = await self._claude.wait_for_response(timeout=timeout, is_cancelled=self._cancelled)
+            await sess.send_message(prompt, file_paths or None)
+            reply = await sess.wait_for_response(timeout=timeout, is_cancelled=self._cancelled)
             self._set_output(step, reply)
-            # Remember which var carries the most recent Claude reply
+            # Remember which var carries the most recent reply of this provider
             out_var = step.get("output")
             if out_var:
-                self._last_claude_reply_var = out_var
+                self._last_reply_var[provider] = out_var
 
-        elif t == "claude_ask":
-            if not self._claude:
-                raise RuntimeError("Нет открытого чата Claude")
+        elif t in ("claude_ask", "gpt_ask"):
+            provider = ai_step_provider(t)
+            sess = self._require_ai_session(provider)
             # Pick which variable to display:
             # 1) explicit show_var on the step
-            # 2) the most recent Claude reply variable (tracked)
-            # 3) legacy fallback claude_reply_1
-            show_var = step.get("show_var") or self._last_claude_reply_var or "claude_reply_1"
+            # 2) the most recent reply variable of this provider (tracked)
+            # 3) legacy fallback {provider}_reply_1
+            show_var = (step.get("show_var") or self._last_reply_var[provider]
+                        or f"{provider}_reply_1")
             last_reply = self.vars.get(show_var, "")
             if self.on_ask_user:
-                user_msg = await self.on_ask_user(last_reply)
+                user_msg = await self.on_ask_user(last_reply, provider)
             else:
                 user_msg = ""
             if user_msg:
                 timeout = int(step.get("timeout", 1200))
-                await self._claude.send_message(user_msg)
-                claude_reply = await self._claude.wait_for_response(timeout=timeout, is_cancelled=self._cancelled)
-                self._set_output(step, claude_reply)
+                await sess.send_message(user_msg)
+                ai_reply = await sess.wait_for_response(timeout=timeout, is_cancelled=self._cancelled)
+                self._set_output(step, ai_reply)
                 out_var = step.get("output")
                 if out_var:
-                    self._last_claude_reply_var = out_var
+                    self._last_reply_var[provider] = out_var
             else:
                 self._set_output(step, "")
 
-        elif t == "claude_chunked":
-            if not self._claude:
-                raise RuntimeError("Нет открытого чата Claude. Добавь шаг «Открыть новый чат»")
+        elif t in ("claude_chunked", "gpt_chunked"):
+            provider = ai_step_provider(t)
+            sess = self._require_ai_session(provider)
             step_name = step.get("name") or "Перевод по кускам"
             # Источник — переменная с полным оригиналом.
             original = self._resolve_text_source(step)
@@ -939,8 +1002,8 @@ class ScenarioRunner:
                                {**self.vars, "original": original})
             if intro.strip():
                 self.on_progress(idx, self._total_steps, step_name, "Отправляю контекст…")
-                await self._claude.send_message(intro)
-                await self._claude.wait_for_response(timeout=timeout, is_cancelled=self._cancelled)
+                await sess.send_message(intro)
+                await sess.wait_for_response(timeout=timeout, is_cancelled=self._cancelled)
 
             # 2) Один txt: создаём пустым, дальше дописываем после каждого
             # ответа — упадёт на середине, готовое сохранится.
@@ -959,8 +1022,8 @@ class ScenarioRunner:
                                  f"Кусок {i}/{total} (~{len(chunk)} симв.)")
                 msg = substitute(chunk_tpl, {**self.vars, "original": original,
                                              "chunk": chunk, "n": i, "total": total})
-                await self._claude.send_message(msg)
-                reply = await self._claude.wait_for_response(
+                await sess.send_message(msg)
+                reply = await sess.wait_for_response(
                     timeout=timeout, is_cancelled=self._cancelled)
                 # Дописываем сразу; между фрагментами пустая строка.
                 with open(path, "a", encoding="utf-8") as f:
@@ -971,7 +1034,7 @@ class ScenarioRunner:
             self._set_output(step, "\n\n".join(combined))
             out_var = step.get("output")
             if out_var:
-                self._last_claude_reply_var = out_var
+                self._last_reply_var[provider] = out_var
 
         elif t == "save_txt":
             content = self._resolve_text_source(step)
@@ -1329,13 +1392,37 @@ class ScenarioRunner:
         if out:
             self.vars[out] = value
 
-    async def _close_claude(self):
-        if self._claude:
+    def _new_ai_session(self, provider: str):
+        """Создать браузерную сессию провайдера. Импорты локальные — как и
+        раньше у Claude: playwright тянется только когда реально нужен."""
+        if provider == "claude":
+            from modules.claude_ui import ClaudeAutomation
+            return ClaudeAutomation()
+        if provider == "gpt":
+            from modules.gpt_ui import GPTAutomation
+            return GPTAutomation()
+        raise RuntimeError(f"Неизвестный AI-провайдер: {provider}")
+
+    def _require_ai_session(self, provider: str):
+        sess = self._ai_sessions.get(provider)
+        if not sess:
+            raise RuntimeError(
+                f"Нет открытого чата {AI_PROVIDER_LABEL[provider]}. "
+                "Добавь шаг «Открыть новый чат»")
+        return sess
+
+    async def _close_ai(self, provider: str):
+        sess = self._ai_sessions.get(provider)
+        if sess:
             try:
-                await self._claude.close()
+                await sess.close()
             except Exception:
                 pass
-            self._claude = None
+            self._ai_sessions[provider] = None
+
+    async def _close_all_ai(self):
+        for provider in AI_PROVIDERS:
+            await self._close_ai(provider)
 
     async def _save_banana(self, data: dict, prefix: str = "image") -> list:
         import aiohttp

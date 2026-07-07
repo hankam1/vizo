@@ -22,6 +22,7 @@ from modules.transcript import get_transcript, get_title, get_description, downl
 from modules.voice_api import synthesize, VoiceCancelled
 from modules.voice_templates import resolve_lang
 from modules.claude_ui import ClaudeAutomation
+from modules.gpt_ui import GPTAutomation
 from modules.veo_api import generate_images
 
 
@@ -39,6 +40,7 @@ _run_ctx = threading.local()
 # (step_type, field_name, kind) — kind is "list" (a list of strings) or "single" (one string).
 _PATH_FIELDS = (
     ("claude_prompt", "file_paths", "list"),
+    ("gpt_prompt",    "file_paths", "list"),
     ("video_i2v",     "image_path", "single"),
     ("video_batch",   "start_image_path", "single"),
     ("video_batch",   "end_image_path",   "single"),
@@ -538,6 +540,49 @@ class Api:
                 self._emit("claude_linked", {"ok": True})
             except Exception as e:
                 self._emit("claude_linked", {"ok": False, "error": str(e)})
+        threading.Thread(target=run, daemon=True).start()
+        return {"ok": True}
+
+    def link_gpt(self):
+        """Открыть браузер ChatGPT для входа в аккаунт (аналог link_claude).
+        Логин НЕ обязателен: chatgpt.com работает и анонимно, но аккаунт даёт
+        выбор моделей, вложения и нормальные лимиты."""
+        async def _link():
+            gpt = GPTAutomation()
+            try:
+                await gpt.start(status_cb=lambda m: self._emit(
+                    "gpt_link_status", {"message": m}))
+                # start() не ждёт логина, если chatgpt.com пустил анонимом, —
+                # держим окно открытым, пока пользователь входит в аккаунт.
+                # Признак входа: кнопка «Log in» исчезла из шапки.
+                self._emit("gpt_link_status", {
+                    "message": "Окно открыто. Войди в аккаунт ChatGPT "
+                               "(или закрой окно, чтобы работать без входа)"})
+                deadline = asyncio.get_event_loop().time() + 300
+                while asyncio.get_event_loop().time() < deadline:
+                    if not gpt.is_alive():
+                        break  # пользователь закрыл окно — ок, аноним-режим
+                    try:
+                        n = await gpt.page.evaluate(
+                            """() => Array.from(document.querySelectorAll(
+                                   'button, a')).filter(b =>
+                                   /^log ?in$/i.test((b.innerText || '').trim())
+                               ).length"""
+                        )
+                        if not n:
+                            break  # кнопки Log in нет — залогинен
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2)
+            finally:
+                await gpt.close()
+
+        def run():
+            try:
+                asyncio.run(_link())
+                self._emit("gpt_linked", {"ok": True})
+            except Exception as e:
+                self._emit("gpt_linked", {"ok": False, "error": str(e)})
         threading.Thread(target=run, daemon=True).start()
         return {"ok": True}
 
@@ -1364,11 +1409,15 @@ class Api:
         self._notify("Очередь завершена", ", ".join(parts), "error" if err else "done")
 
     def _wait_profile_unlocked(self, timeout: float = 8.0):
-        from config import CHROME_PROFILE
+        # Оба профиля (Claude и ChatGPT): предыдущий запуск мог держать
+        # любой из них. Несуществующий/свободный профиль проходит мгновенно.
+        from config import CHROME_PROFILE, GPT_CHROME_PROFILE
         names = ("SingletonLock", "lockfile", "SingletonCookie")
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if not any(os.path.exists(os.path.join(CHROME_PROFILE, n)) for n in names):
+            if not any(os.path.exists(os.path.join(profile, n))
+                       for profile in (CHROME_PROFILE, GPT_CHROME_PROFILE)
+                       for n in names):
                 return
             time.sleep(0.25)
         log.warning("Chrome profile still locked after %.0fs — starting anyway", timeout)
@@ -1643,7 +1692,8 @@ class Api:
     async def _wait_for_user_reply(self, message: str, kind: str = "claude",
                                    title: str = None, cancel_event=None) -> str:
         """Show a prompt to the user and wait for their reply via UI.
-        kind='claude' → Claude dialog screen with chat bubble
+        kind='claude' → dialog screen with chat bubble, брендинг Claude
+        kind='gpt' → тот же экран, брендинг ChatGPT
         kind='input' → generic input request from the scenario engine"""
         # Событие отмены захватываем на старте: self._cancel_event подменяется
         # каждым новым запуском, и старый (отменённый) пайплайн иначе опрашивал
@@ -1686,8 +1736,10 @@ class Api:
             # step's substatus when a new step starts without one.
             self._emit("progress_detail", {"detail": detail or ""})
 
-        async def on_ask_user(message: str) -> str:
-            return await self._wait_for_user_reply(message, kind="claude",
+        async def on_ask_user(message: str, provider: str = "claude") -> str:
+            # provider ("claude" | "gpt") → kind: экран ответа в UI показывает
+            # бренд того чата, который спрашивает.
+            return await self._wait_for_user_reply(message, kind=provider,
                                                    cancel_event=cancel_event)
 
         async def on_user_input(prompt: str) -> str:

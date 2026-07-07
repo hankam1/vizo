@@ -603,6 +603,10 @@ textarea::-webkit-scrollbar-thumb {
   color: #fff;
 }
 .claude-mark svg { width: 13px; height: 13px; }
+/* Тот же значок в режиме ChatGPT (kind='gpt') — teal вместо терракоты */
+.claude-mark.gpt {
+  background: linear-gradient(135deg, #3ec9a0 0%, #10a37f 55%, #0b7a60 100%);
+}
 .vchat-bubble {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -994,6 +998,7 @@ textarea::-webkit-scrollbar-thumb {
   flex-shrink: 0;
 }
 .vnode-icon.claude { background: rgba(204,120,92,0.16); color: #e08a6b; }
+.vnode-icon.gpt { background: rgba(16,163,127,0.16); color: #34c39a; }
 .vnode-icon.voice { background: rgba(244,182,76,0.16); color: #f4b64c; }
 .vnode-icon.image { background: rgba(248,162,98,0.16); color: #f8a262; }
 .vnode-icon.video { background: rgba(128,144,235,0.16); color: #8090eb; }
@@ -1129,6 +1134,20 @@ textarea::-webkit-scrollbar-thumb {
   content: ''; width: 6px; height: 6px;
   border-radius: 50%; background: #cc785c;
 }
+/* GPT-сессия — фирменный teal ChatGPT вместо терракоты Claude */
+.vchat-group.gpt {
+  border-left-color: rgba(16, 163, 127, 0.55);
+  background: linear-gradient(90deg,
+    rgba(16, 163, 127, 0.10) 0%,
+    rgba(16, 163, 127, 0.02) 40%,
+    transparent 100%);
+}
+.vchat-group.gpt .vchat-grouphead {
+  color: #34c39a;
+  background: rgba(16, 163, 127, 0.10);
+  border-color: rgba(16, 163, 127, 0.30);
+}
+.vchat-group.gpt .vchat-grouphead::before { background: #10a37f; }
 .vchat-group .vconnector { display: none; }
 .vchat-group .vnode + .vnode { margin-top: 10px; }
 .vchat-break {
@@ -1730,6 +1749,10 @@ audio { width: 100%; }
         <span class="vsidenav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg></span>
         <span>Claude</span>
       </button>
+      <button class="vsidenav-item" data-pane="gpt" onclick="setPane('gpt')">
+        <span class="vsidenav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
+        <span>ChatGPT</span>
+      </button>
       <button class="vsidenav-item" data-pane="service" onclick="setPane('service')">
         <span class="vsidenav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg></span>
         <span>Обслуживание</span>
@@ -1872,6 +1895,28 @@ audio { width: 100%; }
             <div style="display:flex;gap:16px;align-items:center;">
               <button class="vbtn" onclick="linkClaude()">Привязать Claude аккаунт</button>
               <span style="color:var(--muted);font-size:13px;">Откроется браузер — авторизуйся и закрой.</span>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- CHATGPT -->
+      <div class="vset-pane-content" data-pane="gpt">
+        <div class="vset-inner">
+          <div class="vset-pane-head">
+            <h2>ChatGPT</h2>
+            <p>Привязка аккаунта ChatGPT через автоматизацию браузера. Вход не обязателен: без аккаунта шаги ChatGPT работают анонимно (без выбора модели и вложений, с жёсткими лимитами).</p>
+          </div>
+          <section class="vsection">
+            <div class="vsection-head">
+              <div class="vsection-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              </div>
+              <div class="vsection-title">Привязка аккаунта</div>
+            </div>
+            <div style="display:flex;gap:16px;align-items:center;">
+              <button class="vbtn" onclick="linkGpt()">Привязать ChatGPT аккаунт</button>
+              <span style="color:var(--muted);font-size:13px;">Откроется браузер — авторизуйся и закрой (или просто закрой, чтобы работать без входа).</span>
             </div>
           </section>
         </div>
@@ -2040,13 +2085,13 @@ audio { width: 100%; }
   <main class="vmain" style="padding:32px 96px 24px;align-items:center;">
     <div style="width:100%;max-width:760px;display:flex;flex-direction:column;gap:20px;min-height:0;flex:1;">
       <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:18px;">
-        <!-- Claude mode -->
+        <!-- AI chat mode (Claude / ChatGPT — брендинг ставит showInputRequest) -->
         <div id="input-claude-block" style="display:none;">
           <div class="vchat-label">
-            <span class="claude-mark">
+            <span class="claude-mark" id="input-ai-mark">
               <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 L13.6 9.4 L21 11 L13.6 12.6 L12 20 L10.4 12.6 L3 11 L10.4 9.4 Z"/></svg>
             </span>
-            <span>Claude</span>
+            <span id="input-ai-name">Claude</span>
           </div>
           <div class="vchat-bubble" id="claude-message"></div>
         </div>
@@ -2408,6 +2453,7 @@ audio { width: 100%; }
           <p><strong style="color:var(--ink);">VeoNonStop API Key</strong> — нужен для генерации картинок (Banana 2/Pro) и видео в сценариях.</p>
           <p style="margin-top:8px;"><strong style="color:var(--ink);">Voice API Key</strong> — нужен для озвучки и теста голосов. Две озвучки, два ключа: <strong style="color:var(--ink);">Озвучка Матея</strong> (Bearer-токен от voicer.mat3u.com) и <strong style="color:var(--ink);">VoiceBot</strong> (X-API-Key от voiceapi.csv666.ru).</p>
           <p style="margin-top:8px;"><strong style="color:var(--ink);">Claude</strong> — работает через автоматизацию браузера, нужно один раз «Привязать Claude аккаунт» в настройках (откроется Chrome, авторизуйся в claude.ai и закрой окно).</p>
+          <p style="margin-top:8px;"><strong style="color:var(--ink);">ChatGPT</strong> — тоже через автоматизацию браузера, у него своё окно Chrome. Вход не обязателен: без аккаунта шаги работают анонимно (без выбора модели, без вложений, лимиты жёстче). «Привязать ChatGPT аккаунт» — в настройках.</p>
         </div>
       </section>
 
@@ -2454,6 +2500,13 @@ audio { width: 100%; }
             <div><strong style="color:var(--ink);">Перевод/адаптация по кускам</strong> — для длинных текстов, которые Claude не осилит за один ответ. Сначала шлёт весь оригинал + твои правила (поле «Вступительный промпт», плейсхолдер <code style="font-family:'JetBrains Mono';color:var(--accent);">{original}</code>), потом сам режет текст на куски по концам предложений (размер на выбор: ≈2–3к / 5–7к / 10–15к символов) и отправляет их по одному в тот же чат. Ответ по каждому фрагменту сразу дописывается в один txt (через пустую строку), а склейка всех ответов кладётся в выходную переменную. Перед шагом нужен «Открыть новый чат».</div>
             <div><strong style="color:var(--ink);">Спросить пользователя</strong> — приостанавливает сценарий. Показывает тебе последний ответ Claude и ждёт пока ты введёшь свой текст в UI. Твой текст уходит в чат как следующее сообщение, ответ Claude кладётся в переменную.</div>
             <div><strong style="color:var(--ink);">Закрыть чат</strong> — явно завершает текущую сессию Claude. Не обязателен — сессия закроется автоматически в конце сценария или при следующем «Открыть новый чат».</div>
+          </div>
+
+          <!-- CHATGPT -->
+          <h4 style="font-family:'JetBrains Mono';font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted-2);margin:18px 0 10px;">💬 ChatGPT</h4>
+          <div style="display:flex;flex-direction:column;gap:10px;">
+            <div>Те же пять шагов, что у Claude (открыть чат / промпт / по кускам / спросить / закрыть), но чат идёт на chatgpt.com в отдельном окне браузера. Claude и ChatGPT можно смешивать в одном сценарии — например, перевод делает Claude, а промпты для картинок пишет ChatGPT: оба чата открыты одновременно, у каждого своя сессия.</div>
+            <div><strong style="color:var(--ink);">Модель</strong> выбирается в шаге «Открыть новый чат». Работает только с подпиской ChatGPT: у бесплатного/анонимного аккаунта пикера моделей на сайте нет — шаг предупредит и продолжит на модели по умолчанию.</div>
           </div>
 
           <!-- FILES -->
@@ -2805,6 +2858,11 @@ async function pickFolder() {
 async function linkClaude() {
   toast('Открываю браузер...');
   await api().link_claude();
+}
+
+async function linkGpt() {
+  toast('Открываю браузер...');
+  await api().link_gpt();
 }
 
 async function checkUpdates() {
@@ -3557,13 +3615,17 @@ let _inputKind = 'claude';
 
 function showInputRequest(kind, message, title) {
   _inputKind = kind || 'claude';
-  const isClaude = _inputKind === 'claude';
-  document.getElementById('input-claude-block').style.display = isClaude ? 'block' : 'none';
-  document.getElementById('input-generic-block').style.display = isClaude ? 'none' : 'block';
-  if (isClaude) {
+  // 'claude' и 'gpt' — один и тот же экран чат-пузыря, различается брендинг.
+  const isAiChat = _inputKind === 'claude' || _inputKind === 'gpt';
+  const aiName = _inputKind === 'gpt' ? 'ChatGPT' : 'Claude';
+  document.getElementById('input-claude-block').style.display = isAiChat ? 'block' : 'none';
+  document.getElementById('input-generic-block').style.display = isAiChat ? 'none' : 'block';
+  if (isAiChat) {
+    document.getElementById('input-ai-name').textContent = aiName;
+    document.getElementById('input-ai-mark').classList.toggle('gpt', _inputKind === 'gpt');
     document.getElementById('claude-message').textContent = message || '';
-    document.getElementById('input-title').textContent = title || 'Ответ Claude';
-    document.getElementById('claude-reply').placeholder = 'Введите ответ Claude…';
+    document.getElementById('input-title').textContent = title || ('Ответ ' + aiName);
+    document.getElementById('claude-reply').placeholder = 'Введите ответ ' + aiName + '…';
   } else {
     document.getElementById('input-prompt-text').textContent = message || '';
     document.getElementById('input-title').textContent = title || 'Требуется ввод';
@@ -3893,6 +3955,13 @@ const NODE_TYPES = [
     { key: 'claude_ask', label: 'Спросить пользователя', tone: 'claude' },
     { key: 'claude_close', label: 'Закрыть чат', tone: 'claude' },
   ]},
+  { id: 'gpt', label: '💬 ChatGPT', items: [
+    { key: 'gpt_open', label: 'Открыть новый чат', tone: 'gpt' },
+    { key: 'gpt_prompt', label: 'Отправить промпт', tone: 'gpt' },
+    { key: 'gpt_chunked', label: 'Перевод/адаптация по кускам', tone: 'gpt' },
+    { key: 'gpt_ask', label: 'Спросить пользователя', tone: 'gpt' },
+    { key: 'gpt_close', label: 'Закрыть чат', tone: 'gpt' },
+  ]},
   { id: 'files', label: '💾 Файлы', items: [
     { key: 'save_txt', label: 'Сохранить TXT', tone: 'file' },
     { key: 'save_json', label: 'Сохранить JSON', tone: 'file' },
@@ -4021,10 +4090,10 @@ function addStep(key, label, tone) {
     step.source = '';
     step.output = '';
   }
-  if (key === 'claude_prompt') {
+  if (key === 'claude_prompt' || key === 'gpt_prompt') {
     step.prompt_template = '';
   }
-  if (key === 'claude_chunked') {
+  if (key === 'claude_chunked' || key === 'gpt_chunked') {
     step.source = 'original';
     step.chunk_size = '5-7k';
     step.filename = 'result.txt';
@@ -4036,6 +4105,11 @@ function addStep(key, label, tone) {
   if (key === 'claude_open') {
     step.model = CLAUDE_MODELS[0];
     step.effort = 'max';
+  }
+  if (key === 'gpt_open') {
+    // Пусто = «модель по умолчанию»: на бесплатном аккаунте ChatGPT пикера
+    // моделей нет, и любое явное значение дало бы предупреждение при запуске.
+    step.model = '';
   }
   if (key === 'banana_one') {
     step.model = 'GEM_PIX_2';
@@ -4067,6 +4141,7 @@ function defaultOutputName(type, idx) {
     yt_desc: 'description', yt_preview: 'thumbnail',
     user_text: 'text',
     claude_prompt: 'claude_reply', claude_ask: 'user_input',
+    gpt_prompt: 'gpt_reply', gpt_ask: 'user_input',
     voice: 'voice_mp3',
     banana_one: 'images', banana_batch: 'images',
     video_t2v: 'videos', video_i2v: 'videos', video_batch: 'videos',
@@ -4086,16 +4161,29 @@ function renderChain() {
     </div>`;
     return;
   }
-  // Segment steps into chat groups vs solo nodes
+  // Segment steps into chat groups vs solo nodes. Провайдер (claude/gpt)
+  // у каждой группы свой: gpt-шаг не попадает в claude-сессию и наоборот.
+  // При чередовании провайдеров группа визуально разрывается — это ок,
+  // сами сессии в раннере живут независимо.
+  const aiProviderOf = (t) => {
+    if (!t) return null;
+    const p = t.split('_')[0];
+    return (p === 'claude' || p === 'gpt') ? p : null;
+  };
   const segments = [];
   let chatGroup = null;
   steps.forEach((step, i) => {
-    const isClaude = step.type && step.type.startsWith('claude_');
-    if (step.type === 'claude_open') {
+    const prov = aiProviderOf(step.type);
+    if (prov && step.type === prov + '_open') {
       if (chatGroup) segments.push(chatGroup);
-      chatGroup = { kind: 'chat', items: [{ step, idx: i }] };
-    } else if (isClaude && chatGroup) {
+      chatGroup = { kind: 'chat', provider: prov, items: [{ step, idx: i }] };
+    } else if (prov && chatGroup && chatGroup.provider === prov) {
       chatGroup.items.push({ step, idx: i });
+    } else if (prov) {
+      // AI-шаг другого провайдера без своей открытой группы рядом —
+      // продолжение его сессии после разрыва.
+      if (chatGroup) segments.push(chatGroup);
+      chatGroup = { kind: 'chat', provider: prov, items: [{ step, idx: i }] };
     } else {
       if (chatGroup) { segments.push(chatGroup); chatGroup = null; }
       segments.push({ kind: 'solo', step, idx: i });
@@ -4105,12 +4193,14 @@ function renderChain() {
 
   // Render segments with proper inter-segment gaps
   let html = '';
-  let session = 0;
+  const sessionNo = { claude: 0, gpt: 0 };
   segments.forEach((seg, sIdx) => {
     if (seg.kind === 'chat') {
-      session++;
-      html += `<div class="vchat-group">
-        <span class="vchat-grouphead">сессия claude · #${session}</span>`;
+      sessionNo[seg.provider]++;
+      const provClass = seg.provider === 'gpt' ? ' gpt' : '';
+      const provName = seg.provider === 'gpt' ? 'chatgpt' : 'claude';
+      html += `<div class="vchat-group${provClass}">
+        <span class="vchat-grouphead">сессия ${provName} · #${sessionNo[seg.provider]}</span>`;
       seg.items.forEach(({step, idx}) => { html += renderNode(step, idx); });
       html += '</div>';
     } else {
@@ -4186,6 +4276,15 @@ const CLAUDE_EFFORTS = [
   { key: 'xhigh',  label: 'Extra' },
   { key: 'max',    label: 'Max' },
 ];
+// Пункты меню моделей chatgpt.com (видны только с подпиской; аноним/фри —
+// без пикера). Пусто = не трогать модель. Выбор «мягкий»: если пункта нет,
+// раннер предупреждает и продолжает на модели по умолчанию.
+const GPT_MODELS = [
+  { key: '',         label: '— по умолчанию —' },
+  { key: 'Auto',     label: 'Auto' },
+  { key: 'Instant',  label: 'Instant' },
+  { key: 'Thinking', label: 'Thinking' },
+];
 
 function renderBody(step, idx) {
   const fields = [];
@@ -4216,17 +4315,30 @@ function renderBody(step, idx) {
       <div class="vfield-hint">Глубина мышления. У Haiku настройка игнорируется — там единственный режим. Extra доступна у Opus и Sonnet.</div>
     </div>`);
   }
-  if (step.type === 'claude_prompt') {
+  if (step.type === 'gpt_open') {
+    const curGpt = step.model || '';
+    fields.push(`<div class="vfield">
+      <label class="vfield-label">Модель ChatGPT</label>
+      <select class="vselect" onchange="updateStep(${idx}, 'model', this.value)">
+        ${GPT_MODELS.map(m => `<option value="${escapeHtml(m.key)}" ${curGpt === m.key ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
+      </select>
+      <div class="vfield-hint">Выбор модели работает только с подпиской ChatGPT (без неё пикера на сайте нет). Если модель недоступна — шаг предупредит и продолжит на модели по умолчанию, сценарий не упадёт.</div>
+    </div>`);
+  }
+  if (step.type === 'claude_prompt' || step.type === 'gpt_prompt') {
+    const aiName = step.type === 'gpt_prompt' ? 'ChatGPT' : 'Claude';
     fields.push(`<div class="vfield">
       <label class="vfield-label">Шаблон промпта</label>
       <textarea class="vtextarea" oninput="updateStep(${idx}, 'prompt_template', this.value)" placeholder="Используй {variable_name} для подстановки переменных">${escapeHtml(step.prompt_template || '')}</textarea>
     </div>`);
-    // File attachments (image examples for Claude)
+    // File attachments (image examples for the AI)
     const files = Array.isArray(step.file_paths) ? step.file_paths : [];
     const chipsHtml = files.map((p, i) => renderFileChip(p, idx, i)).join('');
+    const gptFilesNote = step.type === 'gpt_prompt'
+      ? ' Для вложений нужен вход в аккаунт ChatGPT (аноним не принимает файлы).' : '';
     fields.push(`<div class="vfield">
       <label class="vfield-label">Файлы-примеры (опционально)</label>
-      <div class="vfield-hint" style="margin-bottom:8px;">Картинки которые Claude увидит вместе с этим промптом. Поддерживаются переменные вида <code style="font-family:'JetBrains Mono';color:var(--accent);">{thumbnail}</code>.</div>
+      <div class="vfield-hint" style="margin-bottom:8px;">Картинки которые ${aiName} увидит вместе с этим промптом. Поддерживаются переменные вида <code style="font-family:'JetBrains Mono';color:var(--accent);">{thumbnail}</code>.${gptFilesNote}</div>
       <div>${chipsHtml}</div>
       <button class="vbtn secondary" onclick="addPromptFiles(${idx})" style="height:36px;font-size:13px;">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
@@ -4234,7 +4346,7 @@ function renderBody(step, idx) {
       </button>
     </div>`);
   }
-  if (step.type === 'claude_chunked') {
+  if (step.type === 'claude_chunked' || step.type === 'gpt_chunked') {
     const CHUNK_SIZE_OPTS = [
       { key: '2-3k',   label: '≈ 2–3 тыс. символов' },
       { key: '5-7k',   label: '≈ 5–7 тыс. символов' },
@@ -5109,6 +5221,14 @@ window.onPyEvent = function(event, data) {
   if (event === 'claude_link_status') {
     // Статус запуска браузера при привязке (например, докачка Chromium,
     // когда на машине нет ни Chrome, ни Edge).
+    toast(data.message || '');
+    return;
+  }
+  if (event === 'gpt_linked') {
+    toast(data.ok ? 'ChatGPT привязан' : ('Ошибка: ' + data.error), data.ok ? 'success' : 'error');
+    return;
+  }
+  if (event === 'gpt_link_status') {
     toast(data.message || '');
     return;
   }
