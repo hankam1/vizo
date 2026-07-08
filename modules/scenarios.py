@@ -909,23 +909,34 @@ class ScenarioRunner:
                     log.warning("Failed to switch model/effort '%s'/'%s': %s",
                                 model, effort, e)
             else:
-                # ChatGPT: модель по умолчанию пустая («как есть»). Выбор
-                # МЯГКИЙ: на бесплатном аккаунте пикера моделей нет вовсе —
-                # предупреждаем и едем дальше на дефолтной модели, hard-fail
-                # сделал бы сценарии неработоспособными без подписки.
+                # ChatGPT: меню «Intelligence» двухуровневое (июль 2026) —
+                # скорость мышления (Instant/Medium/High) наверху, модель
+                # (GPT-5.5/…/o3) в подменю; и то и другое выбирается одним
+                # sess.set_model(). Выбор МЯГКИЙ: без подписки пунктов может
+                # не быть — предупреждаем и едем дальше, hard-fail сделал бы
+                # сценарии неработоспособными без подписки.
                 model = (step.get("model") or "").strip()
-                if model:
+                # Пункты старого меню (до июля 2026) — маппим на ближайший
+                # смысл: Thinking = «думай дольше» → High; Auto = дефолт.
+                GPT_ALIASES = {"Auto": "", "Thinking": "High"}
+                model = GPT_ALIASES.get(model, model)
+                effort = (step.get("effort") or "").strip()
+                for value in (model, effort):
+                    if not value:
+                        continue
                     try:
-                        ok = await sess.set_model(model)
+                        ok = await sess.set_model(value)
                         if not ok:
-                            log.warning("Не удалось выбрать модель ChatGPT '%s' "
-                                        "— продолжаю на модели по умолчанию", model)
+                            log.warning("Не удалось выбрать «%s» в меню ChatGPT "
+                                        "— продолжаю на настройках по умолчанию",
+                                        value)
                             self.on_progress(
                                 idx, self._total_steps, step.get("name") or label,
-                                f"Модель «{model}» недоступна (нет подписки?) — "
-                                "работаю на модели по умолчанию")
+                                f"«{value}» недоступно в меню ChatGPT (нет "
+                                "подписки?) — работаю на настройках по умолчанию")
                     except Exception as e:
-                        log.warning("Failed to switch GPT model '%s': %s", model, e)
+                        log.warning("Failed to switch GPT option '%s': %s",
+                                    value, e)
 
         elif t in ("claude_close", "gpt_close"):
             await self._close_ai(ai_step_provider(t))

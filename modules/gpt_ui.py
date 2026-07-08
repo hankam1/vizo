@@ -198,87 +198,142 @@ class GPTAutomation:
     # Model selector
     # ------------------------------------------------------------------
 
-    # Названия пунктов меню моделей chatgpt.com (сверяется dom-дампом при
-    # обновлениях). На бесплатном аккаунте пикер может отсутствовать —
-    # тогда выбор модели мягко пропускается.
-    SUPPORTED_MODELS = ["Auto", "Instant", "Thinking"]
+    # Меню «Intelligence» (пилюля в композере, вёрстка июля 2026, сверено
+    # живым DOM на аккаунте Plus): верхний уровень — скорость мышления
+    # (radio Instant/Medium/High), в подменю — выбор модели (radio). Без
+    # подписки пунктов может не быть — тогда выбор мягко пропускается.
+    SUPPORTED_EFFORTS = ["Instant", "Medium", "High"]
+    SUPPORTED_MODELS = ["GPT-5.5", "GPT-5.4", "GPT-5.3", "o3"]
 
     MODEL_MENU_TRIGGERS = [
+        # Пилюля в композере (залогиненный аккаунт, июль 2026). Прячется,
+        # когда в композере есть текст — поэтому модель выбираем ДО ввода
+        # промпта (gpt_open), с пустым композером.
+        'form button.__composer-pill[aria-haspopup="menu"]',
+        'form button[aria-haspopup="menu"]',
+        # Легаси-переключатель в шапке (аноним / старая вёрстка).
         '[data-testid="model-switcher-dropdown-button"]',
         'button[aria-label*="Model selector"]',
-        'button[aria-haspopup="menu"][aria-label*="model" i]',
     ]
 
-    async def set_model(self, model_name: str | None) -> bool:
-        """Переключить модель текущего чата. МЯГКАЯ операция: на бесплатном
-        аккаунте пикера моделей нет — возвращаем True с предупреждением в
-        лог, чтобы сценарий продолжался на дефолтной модели.
+    async def _find_model_trigger(self):
+        for sel in self.MODEL_MENU_TRIGGERS:
+            loc = self.page.locator(sel).first
+            try:
+                if await loc.count() > 0 and await loc.is_visible():
+                    return loc
+            except Exception:
+                continue
+        return None
 
-        Возвращает False только если пикер ЕСТЬ, но переключить на
-        `model_name` не удалось."""
+    async def _open_model_menu(self) -> bool:
+        """Открыть меню пикера (закрыв прежние поповеры). True — меню видно."""
+        if await self.page.locator('[role="menu"]').count() > 0:
+            await self._close_menus()
+        trigger = await self._find_model_trigger()
+        if trigger is None:
+            return False
+        try:
+            await trigger.click(timeout=5_000)
+            await _human_pause(0.4, 0.8)
+        except Exception as e:
+            log.info("Клик по пикеру моделей ChatGPT упал: %s", e)
+            return False
+        return await self.page.locator('[role="menu"]').count() > 0
+
+    async def _menu_item_selected(self, model_name: str) -> bool:
+        """Подтвердить выбор. Пилюля показывает текущее УСИЛИЕ; текущая
+        МОДЕЛЬ — подпись пункта-подменю внутри меню. Если перепроверить не
+        удалось — верим клику (True)."""
+        trigger = await self._find_model_trigger()
+        if trigger is not None:
+            try:
+                label = (await trigger.inner_text(timeout=2_000)) or ""
+                if model_name.lower() in label.lower():
+                    return True
+            except Exception:
+                pass
+        if not await self._open_model_menu():
+            return True  # не смогли перепроверить — верим клику
+        try:
+            sub = self.page.locator(
+                '[role="menu"] [role="menuitem"][aria-haspopup="menu"]').first
+            if await sub.count() > 0:
+                txt = (await sub.inner_text(timeout=2_000)) or ""
+                if model_name.lower() in txt.lower():
+                    return True
+            checked = self.page.locator(
+                '[role="menu"] [role="menuitemradio"][aria-checked="true"]',
+                has_text=model_name)
+            return await checked.count() > 0
+        except Exception:
+            return True
+        finally:
+            await self._close_menus()
+
+    async def set_model(self, model_name: str | None) -> bool:
+        """Выбрать пункт в меню «Intelligence» ChatGPT. Меню двухуровневое
+        (июль 2026): наверху скорость мышления (Instant/Medium/High), в
+        подменю — модель (GPT-5.5/…/o3). `model_name` ищется на обоих
+        уровнях, поэтому и модель, и усилие выставляются этим методом.
+
+        МЯГКАЯ операция: без подписки пикера/пунктов может не быть —
+        возвращаем True с предупреждением в лог, чтобы сценарий продолжался
+        на настройках по умолчанию. False — только если пикер ЕСТЬ, но
+        выбрать `model_name` не удалось."""
         if not model_name:
             return True
         model_name = model_name.strip()
         if not model_name:
             return True
 
-        trigger = None
-        for sel in self.MODEL_MENU_TRIGGERS:
-            loc = self.page.locator(sel).first
-            try:
-                if await loc.count() > 0 and await loc.is_visible():
-                    trigger = loc
-                    break
-            except Exception:
-                continue
-        if trigger is None:
+        if await self._find_model_trigger() is None:
             log.warning("Пикер моделей ChatGPT не найден (бесплатный аккаунт "
-                        "без выбора модели?) — оставляю модель по умолчанию, "
-                        "запрошено '%s'", model_name)
+                        "без выбора модели?) — оставляю настройки по "
+                        "умолчанию, запрошено '%s'", model_name)
             return True
 
         for attempt in range(3):
-            try:
-                await trigger.click(timeout=5_000)
-                await _human_pause(0.5, 0.9)
-            except Exception as e:
-                log.info("Клик по пикеру моделей (попытка %d) упал: %s",
-                         attempt + 1, e)
+            if not await self._open_model_menu():
                 await asyncio.sleep(0.7)
                 continue
-            if await self.page.locator('[role="menu"]').count() == 0:
-                continue
-            try:
-                option = self.page.locator(
-                    f'[role="menuitem"]:has-text("{model_name}"), '
-                    f'[role="menuitemradio"]:has-text("{model_name}")'
+            option = self.page.locator(
+                '[role="menu"] [role="menuitemradio"]',
+                has_text=model_name).first
+            if await option.count() == 0:
+                # Модели живут в подменю — раскрываем его и ищем ещё раз.
+                sub = self.page.locator(
+                    '[role="menu"] [role="menuitem"][aria-haspopup="menu"]'
                 ).first
-                if await option.count() == 0:
-                    log.warning("Пункта '%s' нет в меню моделей ChatGPT",
-                                model_name)
-                    await self._close_menus()
-                    return False
+                if await sub.count() > 0:
+                    try:
+                        await sub.click(timeout=5_000)
+                        await _human_pause(0.4, 0.8)
+                    except Exception as e:
+                        log.info("Клик по подменю моделей упал: %s", e)
+                    option = self.page.locator(
+                        '[role="menu"] [role="menuitemradio"]',
+                        has_text=model_name).first
+            if await option.count() == 0:
+                log.warning("Пункта '%s' нет в меню ChatGPT", model_name)
+                await self._close_menus()
+                return False
+            try:
                 await option.click(timeout=5_000)
-                await _human_pause(0.6, 1.1)
+                await _human_pause(0.5, 1.0)
             except Exception as e:
-                log.info("Клик по модели '%s' (попытка %d) упал: %s",
+                log.info("Клик по пункту '%s' (попытка %d) упал: %s",
                          model_name, attempt + 1, e)
                 await self._close_menus()
                 continue
-            # Верификация: текст кнопки-триггера обычно содержит выбранную
-            # модель. Если прочитать не удалось — верим клику.
-            try:
-                label = (await trigger.inner_text(timeout=2_000)) or ""
-            except Exception:
-                label = ""
-            if not label or model_name.lower() in label.lower():
-                log.info("Модель ChatGPT переключена на '%s' (попытка %d)",
+            if await self._menu_item_selected(model_name):
+                log.info("ChatGPT: выбран пункт меню '%s' (попытка %d)",
                          model_name, attempt + 1)
                 await self._close_menus()
                 return True
-            log.info("Модель не переключилась (кнопка='%s', нужно '%s') — "
-                     "попытка %d/3", label.strip(), model_name, attempt + 1)
-        log.warning("Не смог переключить модель ChatGPT на '%s'", model_name)
+            log.info("Выбор '%s' не подтвердился — попытка %d/3",
+                     model_name, attempt + 1)
+        log.warning("Не смог выбрать '%s' в меню ChatGPT", model_name)
         await self._close_menus()
         return False
 
@@ -696,21 +751,24 @@ class GPTAutomation:
         """Число copy-кнопок у ответов АССИСТЕНТА. У chatgpt.com copy-кнопка
         есть и под сообщением пользователя (появляется сразу при отправке) —
         считать её нельзя, иначе «ответ готов» сработает до генерации.
-        Скоупим по article-контейнеру хода диалога; фолбэк — общий счётчик."""
+        Ход диалога оборачивается в контейнер: <article> в старой вёрстке,
+        <section data-testid="conversation-turn-N"> с июля 2026. Каждую
+        кнопку скоупим по её контейнеру; фолбэк — общий счётчик."""
         return await self._safe_eval(
             """
             () => {
                 const COPY = %s;
-                const arts = document.querySelectorAll('article');
-                if (arts.length) {
-                    let n = 0;
-                    for (const a of arts) {
-                        if (a.querySelector('[data-message-author-role="assistant"]')
-                            && a.querySelector(COPY)) n++;
-                    }
-                    return n;
+                const btns = document.querySelectorAll(COPY);
+                let n = 0, scoped = false;
+                for (const b of btns) {
+                    const turn = b.closest(
+                        'article, section[data-testid^="conversation-turn"]');
+                    if (!turn) continue;
+                    scoped = true;
+                    if (turn.querySelector(
+                            '[data-message-author-role="assistant"]')) n++;
                 }
-                return document.querySelectorAll(COPY).length;
+                return scoped ? n : btns.length;
             }
             """ % json.dumps(COPY_BUTTON_SELECTOR),
             default=0,

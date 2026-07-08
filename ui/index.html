@@ -4107,9 +4107,10 @@ function addStep(key, label, tone) {
     step.effort = 'max';
   }
   if (key === 'gpt_open') {
-    // Пусто = «модель по умолчанию»: на бесплатном аккаунте ChatGPT пикера
+    // Пусто = «по умолчанию»: на бесплатном аккаунте ChatGPT пикера
     // моделей нет, и любое явное значение дало бы предупреждение при запуске.
     step.model = '';
+    step.effort = '';
   }
   if (key === 'banana_one') {
     step.model = 'GEM_PIX_2';
@@ -4276,14 +4277,22 @@ const CLAUDE_EFFORTS = [
   { key: 'xhigh',  label: 'Extra' },
   { key: 'max',    label: 'Max' },
 ];
-// Пункты меню моделей chatgpt.com (видны только с подпиской; аноним/фри —
-// без пикера). Пусто = не трогать модель. Выбор «мягкий»: если пункта нет,
-// раннер предупреждает и продолжает на модели по умолчанию.
+// Меню «Intelligence» chatgpt.com (июль 2026, сверено на аккаунте Plus):
+// модель — в подменю (GPT-5.5/5.4/5.3/o3), скорость мышления — верхний
+// уровень (Instant/Medium/High). Пусто = не трогать. Выбор «мягкий»: если
+// пункта нет (аноним/фри), раннер предупреждает и продолжает как есть.
 const GPT_MODELS = [
-  { key: '',         label: '— по умолчанию —' },
-  { key: 'Auto',     label: 'Auto' },
-  { key: 'Instant',  label: 'Instant' },
-  { key: 'Thinking', label: 'Thinking' },
+  { key: '',        label: '— по умолчанию —' },
+  { key: 'GPT-5.5', label: 'GPT-5.5' },
+  { key: 'GPT-5.4', label: 'GPT-5.4' },
+  { key: 'GPT-5.3', label: 'GPT-5.3' },
+  { key: 'o3',      label: 'o3' },
+];
+const GPT_EFFORTS = [
+  { key: '',        label: '— по умолчанию —' },
+  { key: 'Instant', label: 'Instant (быстро)' },
+  { key: 'Medium',  label: 'Medium' },
+  { key: 'High',    label: 'High (думает дольше)' },
 ];
 
 function renderBody(step, idx) {
@@ -4317,12 +4326,20 @@ function renderBody(step, idx) {
   }
   if (step.type === 'gpt_open') {
     const curGpt = step.model || '';
+    const curGptEffort = step.effort || '';
     fields.push(`<div class="vfield">
       <label class="vfield-label">Модель ChatGPT</label>
       <select class="vselect" onchange="updateStep(${idx}, 'model', this.value)">
         ${GPT_MODELS.map(m => `<option value="${escapeHtml(m.key)}" ${curGpt === m.key ? 'selected' : ''}>${escapeHtml(m.label)}</option>`).join('')}
       </select>
-      <div class="vfield-hint">Выбор модели работает только с подпиской ChatGPT (без неё пикера на сайте нет). Если модель недоступна — шаг предупредит и продолжит на модели по умолчанию, сценарий не упадёт.</div>
+      <div class="vfield-hint">Выбор модели требует подписки ChatGPT. Если пункта нет в меню — шаг предупредит и продолжит на модели по умолчанию, сценарий не упадёт.</div>
+    </div>
+    <div class="vfield">
+      <label class="vfield-label">Скорость мышления (Intelligence)</label>
+      <select class="vselect" onchange="updateStep(${idx}, 'effort', this.value)">
+        ${GPT_EFFORTS.map(e => `<option value="${escapeHtml(e.key)}" ${curGptEffort === e.key ? 'selected' : ''}>${escapeHtml(e.label)}</option>`).join('')}
+      </select>
+      <div class="vfield-hint">Instant отвечает сразу, High думает дольше и глубже. Тоже мягкий выбор: без подписки шаг продолжит на настройках по умолчанию.</div>
     </div>`);
   }
   if (step.type === 'claude_prompt' || step.type === 'gpt_prompt') {
