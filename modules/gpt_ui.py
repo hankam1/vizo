@@ -56,6 +56,12 @@ CHIP_SELECTORS = (
     '[data-testid*="attachment"], '
     'button[aria-label="Remove file"], button[aria-label*="Remove"]'
 )
+# Выше этого размера клипборд-вставку chatgpt.com конвертирует в чип-вложение
+# «Pasted text» (порог ~10 тыс. симв., 2026-07; берём с запасом). Инструкции
+# ВНУТРИ вложения GPT демонстративно НЕ выполняет («инструкции — содержимое
+# файла, а не указания для меня» — живой ответ GPT-5.5), поэтому длинный
+# промпт обязан остаться обычным текстом сообщения.
+PASTE_AS_TEXT_LIMIT = 6_000
 
 
 def _looks_like_login(url: str) -> bool:
@@ -394,6 +400,36 @@ class GPTAutomation:
                 await asyncio.sleep(0.5)
         except Exception as e:
             log.debug("dismiss_login_modal failed: %s", e)
+        # NUX-оверлеи БЕЗ role=dialog (например modal-m3m-nux «ChatGPT will
+        # remember info…») перехватывают клики по композеру. Закрываем явной
+        # кнопкой закрытия, а если её нет — Escape (мы вызываемся только до
+        # отправки, когда Escape ничего полезного не оборвёт).
+        try:
+            state = await self.page.evaluate(
+                """
+                () => {
+                    const out = {present: 0, clicked: 0};
+                    for (const m of document.querySelectorAll(
+                            '[data-testid^="modal-"], [id^="modal-"]')) {
+                        if (!m.getClientRects().length) continue;  // скрытый
+                        out.present++;
+                        const b = m.querySelector(
+                            'button[aria-label="Close"], '
+                            'button[data-testid="close-button"]');
+                        if (b) { b.click(); out.clicked++; }
+                    }
+                    return out;
+                }
+                """
+            )
+            if state and state.get("present"):
+                if state["present"] > state["clicked"]:
+                    await self.page.keyboard.press("Escape")
+                log.info("NUX-оверлеев поверх чата: %d (закрыто кнопкой: %d)",
+                         state["present"], state["clicked"])
+                await asyncio.sleep(0.5)
+        except Exception as e:
+            log.debug("dismiss nux overlay failed: %s", e)
 
     async def _get_input(self):
         for sel in INPUT_SELECTORS:
@@ -450,24 +486,72 @@ class GPTAutomation:
             % json.dumps(CHIP_SELECTORS), default=0)
         return int(n or 0)
 
+    async def _send_button_present(self) -> bool:
+        """Есть ли кнопка отправки. Она появляется, только когда композер
+        непуст (текст ИЛИ вложение), поэтому её появление — локале-
+        независимый сигнал «вставка принята»: data-testid не переводится,
+        в отличие от aria-label кнопок чипа."""
+        return bool(await self._safe_eval(
+            """() => !!document.querySelector('[data-testid="send-button"]')""",
+            default=False))
+
+    async def _insert_text_js(self, text: str) -> bool:
+        """Вставить текст в редактор программно (execCommand insertText),
+        МИНУЯ paste-событие — тогда chatgpt.com не конвертирует его в
+        чип-вложение и он остаётся обычным текстом сообщения. Заменяет
+        текущее содержимое (аналог Ctrl+A + вставка)."""
+        try:
+            return bool(await self.page.evaluate(
+                """(t) => {
+                    const el = document.querySelector('#prompt-textarea');
+                    if (!el) return false;
+                    el.focus();
+                    const sel = window.getSelection();
+                    if (sel && typeof sel.selectAllChildren === 'function')
+                        sel.selectAllChildren(el);
+                    return document.execCommand('insertText', false, t);
+                }""", text))
+        except Exception as e:
+            log.info("JS-вставка текста не сработала: %s", e)
+            return False
+
     async def _paste_text(self, text: str, input_el=None, chip_baseline: int = 0):
-        """Copy text to clipboard and paste into the focused input.
-        Верификация по живому DOM (см. подробный разбор в claude_ui):
-        протухший handle ProseMirror «не видит» текст, а очень длинную
-        вставку композер может конвертировать в чип-вложение."""
+        """Вставить текст в композер. Верификация по живому DOM (см. разбор
+        в claude_ui): протухший handle ProseMirror «не видит» текст.
+
+        Длинную клипборд-вставку (> PASTE_AS_TEXT_LIMIT) chatgpt.com
+        конвертирует в чип-вложение, а инструкции ИЗ вложения GPT не
+        выполняет — поэтому длинный текст первым делом вставляем программно
+        (_insert_text_js), чтобы он остался текстом. Клипборд — фолбэк; если
+        текст всё же ушёл чипом, считаем вставку успешной, но предупреждаем:
+        ответ может оказаться не по промпту."""
+        send_btn_before = await self._send_button_present()
+        long_text = len(text) > PASTE_AS_TEXT_LIMIT
         for attempt in range(2):
-            pyperclip.copy(text)
-            await self.page.keyboard.press(f"{EDIT_MODIFIER}+a")
-            await _human_pause(0.15, 0.4)
-            await self.page.keyboard.press(f"{EDIT_MODIFIER}+v")
+            pasted_js = False
+            if long_text and attempt == 0:
+                pasted_js = await self._insert_text_js(text)
+            if not pasted_js:
+                pyperclip.copy(text)
+                await self.page.keyboard.press(f"{EDIT_MODIFIER}+a")
+                await _human_pause(0.15, 0.4)
+                await self.page.keyboard.press(f"{EDIT_MODIFIER}+v")
             await _human_pause(0.5, 1.1)
             if input_el is None:
                 return
-            for _ in range(6):
+            # Конвертация большой вставки в чип занимает до нескольких
+            # секунд — ждём дольше, чем хватает обычному тексту.
+            for _ in range(10):
                 if await self._editor_contains(text):
                     return
-                if await self._composer_chip_count() > chip_baseline:
-                    log.info("Вставка ушла чипом-вложением — это успех")
+                if (await self._composer_chip_count() > chip_baseline
+                        or (not send_btn_before
+                            and await self._send_button_present())):
+                    log.warning(
+                        "Вставка ушла чипом-вложением. ChatGPT считает такой "
+                        "текст ФАЙЛОМ и может не выполнить инструкции из "
+                        "него — если ответ окажется не по промпту, скорми "
+                        "текст шагом «частями» (gpt_chunked).")
                     return
                 await asyncio.sleep(0.4)
             log.warning("Вставка не дала текста в редакторе (попытка %d/2)",
@@ -481,7 +565,11 @@ class GPTAutomation:
                 break
         raise RuntimeError(
             "Текст промпта не вставился в поле ввода ChatGPT — вставка из "
-            "буфера обмена не сработала. Попробуй запустить шаг ещё раз.")
+            "буфера обмена не сработала. Частая причина: длинный текст "
+            "ChatGPT превращает во вложение-файл, а БЕЗ входа в аккаунт "
+            "вложения не работают — войди в аккаунт (Настройки → ChatGPT) "
+            "или скорми текст шагом «частями» (gpt_chunked). Если не "
+            "помогло — попробуй запустить шаг ещё раз.")
 
     async def _upload_files(self, paths: list[str]):
         """Upload files via the hidden file input (works even if button not
@@ -554,6 +642,20 @@ class GPTAutomation:
                 "Chrome был занят другим окном. Попробуйте ещё раз."
             )
         await self._dismiss_login_modal()
+        # Осиротевший драфт: если прошлая отправка упала между вставкой и
+        # Enter, в композере мог остаться чип-вложение (драфты ChatGPT
+        # переживают даже перезапуск браузера) — иначе он уедет вместе с
+        # ЭТИМ сообщением. Чистим best-effort (селекторы en-локали).
+        leftovers = await self._composer_chip_count()
+        if leftovers:
+            log.warning("В композере %d осиротевших чипов-вложений — убираю",
+                        leftovers)
+            await self._safe_eval(
+                """() => {
+                    for (const b of document.querySelectorAll(%s))
+                        if (b.tagName === 'BUTTON') b.click();
+                }""" % json.dumps(CHIP_SELECTORS), default=None)
+            await asyncio.sleep(0.8)
         if file_paths:
             await self._upload_files(file_paths)
 
@@ -615,8 +717,68 @@ class GPTAutomation:
                     "сообщение не отправлено. Запусти шаг ещё раз.")
         # Базлайн ДО отправки — см. комментарий у _copies_before_send.
         self._copies_before_send = await self._copy_button_count()
-        await self.page.keyboard.press("Enter")
+        await self._press_send()
         await _human_pause(1.2, 2.0)
+
+    async def _press_send(self):
+        """Отправить содержимое композера и УБЕДИТЬСЯ, что оно ушло.
+
+        Enter — no-op, пока чип-вложение (в т.ч. длинная вставка,
+        сконвертированная в «Pasted text») ещё загружается: send-button в
+        этот момент disabled. Поэтому: дождаться активной кнопки → Enter →
+        проверить отправку → фолбэк кликом по самой send-button."""
+        # 1) Дождаться, пока кнопка отправки станет активной (вложение
+        #    догрузилось). Для обычного текста она активна сразу.
+        for _ in range(40):  # до 20 с
+            st = await self._safe_eval(
+                """() => {
+                    const b = document.querySelector('[data-testid="send-button"]');
+                    if (!b) return 'absent';
+                    return (b.disabled || b.getAttribute('aria-disabled') === 'true'
+                            || b.getAttribute('data-disabled') === 'true')
+                        ? 'disabled' : 'ready';
+                }""", default="absent")
+            if st == "ready":
+                break
+            await asyncio.sleep(0.5)
+
+        async def sent_ok() -> bool:
+            # Во время генерации send-button заменяется stop-кнопкой.
+            if await self._stop_button_present():
+                return True
+            # Либо композер полностью опустел (мгновенный ответ уже готов).
+            if await self._send_button_present():
+                return False
+            if await self._composer_chip_count() > 0:
+                return False
+            has_text = await self._safe_eval(
+                """() => {
+                    const e = document.querySelector('#prompt-textarea');
+                    return !!(e && e.textContent.trim().length);
+                }""", default=False)
+            return not has_text
+
+        for attempt in range(3):
+            if attempt == 0:
+                await self.page.keyboard.press("Enter")
+            else:
+                log.info("Отправка не подтвердилась — кликаю send-button "
+                         "(попытка %d)", attempt + 1)
+                try:
+                    await self.page.locator(
+                        '[data-testid="send-button"]').first.click(timeout=3_000)
+                except Exception as e:
+                    log.info("Клик по send-button упал: %s", e)
+            for _ in range(8):  # ~4 с на подтверждение
+                await asyncio.sleep(0.5)
+                if await sent_ok():
+                    return
+        raise RuntimeError(
+            "Сообщение не отправилось в ChatGPT: композер не очистился после "
+            "Enter и клика по кнопке отправки. Если промпт длинный — ChatGPT "
+            "превращает его во вложение, а БЕЗ входа в аккаунт вложения не "
+            "работают: войди в аккаунт (Настройки → ChatGPT) или скорми "
+            "текст шагом «частями» (gpt_chunked).")
 
     async def _safe_eval(self, script: str, default=None):
         """page.evaluate, переживающий клиентские навигации (первое сообщение
