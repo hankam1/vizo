@@ -1134,6 +1134,15 @@ textarea::-webkit-scrollbar-thumb {
   content: ''; width: 6px; height: 6px;
   border-radius: 50%; background: #cc785c;
 }
+/* Ручка переноса всей сессии — рядом с лейблом «сессия …» */
+.vchat-grip {
+  display: inline-flex; align-items: center;
+  margin-left: 4px; padding: 1px 2px;
+  opacity: 0.6; cursor: grab; color: inherit;
+}
+.vchat-grip:hover { opacity: 1; }
+.vchat-grip:active { cursor: grabbing; }
+.vchat-group.dragging { opacity: 0.45; }
 /* GPT-сессия — фирменный teal ChatGPT вместо терракоты Claude */
 .vchat-group.gpt {
   border-left-color: rgba(16, 163, 127, 0.55);
@@ -4162,10 +4171,46 @@ function renderChain() {
     </div>`;
     return;
   }
-  // Segment steps into chat groups vs solo nodes. Провайдер (claude/gpt)
-  // у каждой группы свой: gpt-шаг не попадает в claude-сессию и наоборот.
-  // При чередовании провайдеров группа визуально разрывается — это ок,
-  // сами сессии в раннере живут независимо.
+  const segments = computeChainSegments(steps);
+
+  // Render segments with proper inter-segment gaps
+  let html = '';
+  const sessionNo = { claude: 0, gpt: 0 };
+  segments.forEach((seg, sIdx) => {
+    if (seg.kind === 'chat') {
+      sessionNo[seg.provider]++;
+      const provClass = seg.provider === 'gpt' ? ' gpt' : '';
+      const provName = seg.provider === 'gpt' ? 'chatgpt' : 'claude';
+      html += `<div class="vchat-group${provClass}">
+        <span class="vchat-grouphead">сессия ${provName} · #${sessionNo[seg.provider]}<span
+          class="vchat-grip" draggable="true"
+          title="Перетащи, чтобы перенести всю сессию целиком"
+          ondragstart="groupDragStart(event, ${seg.items[0].idx}, ${seg.items.length})"
+          ondragend="nodeDragEnd(event)"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="5" r="1.8"/><circle cx="15" cy="5" r="1.8"/><circle cx="9" cy="12" r="1.8"/><circle cx="15" cy="12" r="1.8"/><circle cx="9" cy="19" r="1.8"/><circle cx="15" cy="19" r="1.8"/></svg></span></span>`;
+      seg.items.forEach(({step, idx}) => { html += renderNode(step, idx); });
+      html += '</div>';
+    } else {
+      html += renderNode(seg.step, seg.idx);
+    }
+    if (sIdx < segments.length - 1) {
+      const next = segments[sIdx + 1];
+      if (seg.kind === 'chat' && next.kind === 'chat') {
+        html += '<div class="vchat-break">сменили чат</div>';
+      } else if (seg.kind === 'solo' && next.kind === 'solo') {
+        html += '<div class="vconnector"></div>';
+      }
+      // solo↔chat границы — без коннектора, разделение через сам chat-group (бордер + лейбл)
+    }
+  });
+  host.innerHTML = html;
+}
+
+// Segment steps into chat groups vs solo nodes. Провайдер (claude/gpt)
+// у каждой группы свой: gpt-шаг не попадает в claude-сессию и наоборот.
+// При чередовании провайдеров группа визуально разрывается — это ок,
+// сами сессии в раннере живут независимо. Используется и отрисовкой, и
+// переносом целой сессии (snapToGroupBoundary) — блоки всегда contiguous.
+function computeChainSegments(steps) {
   const aiProviderOf = (t) => {
     if (!t) return null;
     const p = t.split('_')[0];
@@ -4191,33 +4236,7 @@ function renderChain() {
     }
   });
   if (chatGroup) segments.push(chatGroup);
-
-  // Render segments with proper inter-segment gaps
-  let html = '';
-  const sessionNo = { claude: 0, gpt: 0 };
-  segments.forEach((seg, sIdx) => {
-    if (seg.kind === 'chat') {
-      sessionNo[seg.provider]++;
-      const provClass = seg.provider === 'gpt' ? ' gpt' : '';
-      const provName = seg.provider === 'gpt' ? 'chatgpt' : 'claude';
-      html += `<div class="vchat-group${provClass}">
-        <span class="vchat-grouphead">сессия ${provName} · #${sessionNo[seg.provider]}</span>`;
-      seg.items.forEach(({step, idx}) => { html += renderNode(step, idx); });
-      html += '</div>';
-    } else {
-      html += renderNode(seg.step, seg.idx);
-    }
-    if (sIdx < segments.length - 1) {
-      const next = segments[sIdx + 1];
-      if (seg.kind === 'chat' && next.kind === 'chat') {
-        html += '<div class="vchat-break">сменили чат</div>';
-      } else if (seg.kind === 'solo' && next.kind === 'solo') {
-        html += '<div class="vconnector"></div>';
-      }
-      // solo↔chat границы — без коннектора, разделение через сам chat-group (бордер + лейбл)
-    }
-  });
-  host.innerHTML = html;
+  return segments;
 }
 
 function renderNode(step, idx) {
@@ -4577,6 +4596,49 @@ function togglePar(idx) {
 
 // --- Drag-and-drop reordering of scenario steps ---
 let _dragStepIdx = null;
+// Перенос ЦЕЛОЙ AI-сессии (блока подряд идущих шагов) за ручку у лейбла
+// «сессия …»: {from, len} в индексах steps. Взаимоисключим с _dragStepIdx.
+let _dragBlock = null;
+
+function groupDragStart(e, from, len) {
+  e.stopPropagation();
+  _dragBlock = { from, len };
+  _dragStepIdx = null;
+  e.dataTransfer.effectAllowed = 'move';
+  try { e.dataTransfer.setData('text/plain', 'session-block'); } catch (err) {}
+  const g = e.currentTarget.closest('.vchat-group');
+  if (g) g.classList.add('dragging');
+}
+
+// Точку вставки, попавшую ВНУТРЬ чужой чат-группы, прижимаем к её ближайшей
+// границе — иначе перенесённая сессия разрежет чужую по шагам и сценарий
+// станет невалидным (двойной claude_open и т.п.).
+function snapToGroupBoundary(steps, pos) {
+  for (const seg of computeChainSegments(steps)) {
+    if (seg.kind !== 'chat') continue;
+    const s = seg.items[0].idx;
+    const en = seg.items[seg.items.length - 1].idx + 1;
+    if (pos > s && pos < en) return (pos - s <= en - pos) ? s : en;
+  }
+  return pos;
+}
+
+function blockDrop(targetIdx, insertBefore) {
+  const { from, len } = _dragBlock;
+  _dragBlock = null;
+  if (targetIdx >= from && targetIdx < from + len) return; // в себя нельзя
+  let pos = insertBefore ? targetIdx : targetIdx + 1;
+  const steps = editingScenario.steps;
+  const block = steps.splice(from, len);
+  if (pos > from) pos -= len;
+  pos = snapToGroupBoundary(steps, pos);
+  if (pos < 0) pos = 0;
+  if (pos > steps.length) pos = steps.length;
+  steps.splice(pos, 0, ...block);
+  editingExpanded = -1;
+  markDirty();
+  renderChain();
+}
 
 function nodeDragStart(e, idx) {
   _dragStepIdx = idx;
@@ -4587,7 +4649,12 @@ function nodeDragStart(e, idx) {
 }
 
 function nodeDragOver(e, idx) {
-  if (_dragStepIdx === null || idx === _dragStepIdx) return;
+  if (_dragBlock) {
+    // внутрь переносимого блока не целимся
+    if (idx >= _dragBlock.from && idx < _dragBlock.from + _dragBlock.len) return;
+  } else if (_dragStepIdx === null || idx === _dragStepIdx) {
+    return;
+  }
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
   const target = e.currentTarget;
@@ -4605,6 +4672,11 @@ function nodeDrop(e, targetIdx) {
   e.preventDefault();
   const target = e.currentTarget;
   target.classList.remove('drop-above', 'drop-below');
+  const rectB = target.getBoundingClientRect();
+  if (_dragBlock) {
+    blockDrop(targetIdx, e.clientY < rectB.top + rectB.height / 2);
+    return;
+  }
   if (_dragStepIdx === null || _dragStepIdx === targetIdx) return;
   const rect = target.getBoundingClientRect();
   const insertBefore = e.clientY < rect.top + rect.height / 2;
@@ -4625,7 +4697,8 @@ function nodeDrop(e, targetIdx) {
 
 function nodeDragEnd(e) {
   _dragStepIdx = null;
-  document.querySelectorAll('.vnode').forEach(n => {
+  _dragBlock = null;
+  document.querySelectorAll('.vnode, .vchat-group').forEach(n => {
     n.classList.remove('dragging', 'drop-above', 'drop-below');
   });
 }

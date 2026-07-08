@@ -22,7 +22,7 @@ from modules.transcript import get_transcript, get_title, get_description, downl
 from modules.voice_api import synthesize, VoiceCancelled
 from modules.voice_templates import resolve_lang
 from modules.claude_ui import ClaudeAutomation
-from modules.gpt_ui import GPTAutomation
+from modules.gpt_ui import GPTAutomation, _looks_like_login as _gpt_auth_page
 from modules.veo_api import generate_images
 
 
@@ -554,23 +554,48 @@ class Api:
                     "gpt_link_status", {"message": m}))
                 # start() не ждёт логина, если chatgpt.com пустил анонимом, —
                 # держим окно открытым, пока пользователь входит в аккаунт.
-                # Признак входа: кнопка «Log in» исчезла из шапки.
+                # Признак входа СТРОГИЙ: мы на chatgpt.com (не на странице
+                # авторизации!), есть композер и кнопка аккаунта, и нет кнопок
+                # Log in / Sign up — стабильно несколько проверок подряд.
+                # Раньше хватало исчезновения «Log in» — но она исчезает уже
+                # на странице ВВОДА ПОЧТЫ, и привязка рапортовала «вошёл»,
+                # когда человек только начал логиниться.
                 self._emit("gpt_link_status", {
-                    "message": "Окно открыто. Войди в аккаунт ChatGPT "
-                               "(или закрой окно, чтобы работать без входа)"})
-                deadline = asyncio.get_event_loop().time() + 300
+                    "message": "Окно открыто. Войди в аккаунт ChatGPT — "
+                               "времени достаточно, до 15 минут (или закрой "
+                               "окно, чтобы работать без входа)"})
+                deadline = asyncio.get_event_loop().time() + 900
+                stable = 0
                 while asyncio.get_event_loop().time() < deadline:
                     if not gpt.is_alive():
                         break  # пользователь закрыл окно — ок, аноним-режим
                     try:
-                        n = await gpt.page.evaluate(
-                            """() => Array.from(document.querySelectorAll(
-                                   'button, a')).filter(b =>
-                                   /^log ?in$/i.test((b.innerText || '').trim())
-                               ).length"""
-                        )
-                        if not n:
-                            break  # кнопки Log in нет — залогинен
+                        if _gpt_auth_page(gpt.page.url or ""):
+                            stable = 0  # человек ещё на странице авторизации
+                        else:
+                            st = await gpt.page.evaluate(
+                                """() => ({
+                                    composer: !!document.querySelector(
+                                        '#prompt-textarea'),
+                                    account: !!document.querySelector(
+                                        '[data-testid="accounts-profile-button"], '
+                                        + '[data-testid="profile-button"]'),
+                                    loginBtns: Array.from(
+                                        document.querySelectorAll('button, a'))
+                                        .filter(b => /^(log ?in|sign ?up|войти)$/i
+                                            .test((b.innerText || '').trim()))
+                                        .length,
+                                })"""
+                            )
+                            if (st and st.get("composer") and st.get("account")
+                                    and not st.get("loginBtns")):
+                                stable += 1
+                                if stable >= 3:  # ~6с подряд стабильно «вошёл»
+                                    self._emit("gpt_link_status", {
+                                        "message": "Вход в аккаунт обнаружен ✓"})
+                                    break
+                            else:
+                                stable = 0
                     except Exception:
                         pass
                     await asyncio.sleep(2)
