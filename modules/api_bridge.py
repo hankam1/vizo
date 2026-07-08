@@ -517,7 +517,22 @@ class Api:
         return updater.check_for_updates()
 
     def apply_update(self, url: str):
-        return updater.download_and_apply(url)
+        # Прогресс загрузки — в UI (exe ~46 МБ, на медленной сети минуты
+        # «мёртвой тишины» выглядят как зависание). Троттлим до смены
+        # процента (или полумегабайта, если сервер не отдал размер), чтобы
+        # не заспамить evaluate_js на каждом 64К-чанке.
+        last = {"mark": -1}
+        def cb(done, total):
+            mark = int(done * 100 / total) if total else done // 524_288
+            if mark == last["mark"]:
+                return
+            last["mark"] = mark
+            self._emit("update_progress", {
+                "pct": int(done * 100 / total) if total else None,
+                "mb": round(done / 1048576, 1),
+                "total_mb": round(total / 1048576, 1) if total else None,
+            })
+        return updater.download_and_apply(url, progress_cb=cb)
 
     # --- Claude auth (opens browser for login) ---
 

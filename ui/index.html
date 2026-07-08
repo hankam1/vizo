@@ -1965,7 +1965,16 @@ audio { width: 100%; }
             <div id="update-box" style="display:none;margin-top:14px;padding:14px;background:var(--surface-2);border-radius:10px;border:1px solid var(--accent);">
               <div style="font-weight:600;margin-bottom:6px;">Доступна версия <span id="new-version"></span></div>
               <div style="color:var(--muted);margin-bottom:10px;white-space:pre-wrap;font-size:13px;" id="update-notes"></div>
-              <button class="vbtn" style="width:100%;" onclick="applyUpdate()">Обновить и перезапустить</button>
+              <button class="vbtn" style="width:100%;" id="update-apply-btn" onclick="applyUpdate()">Обновить и перезапустить</button>
+              <div id="update-progress" style="display:none;margin-top:12px;">
+                <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:6px;">
+                  <span id="update-progress-label">Скачиваю…</span>
+                  <span id="update-progress-pct"></span>
+                </div>
+                <div style="height:6px;background:rgba(127,127,127,0.18);border-radius:3px;overflow:hidden;">
+                  <div id="update-progress-bar" style="height:100%;width:0%;background:var(--accent);border-radius:3px;transition:width 0.25s;"></div>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -2891,9 +2900,43 @@ async function checkUpdates() {
 
 async function applyUpdate() {
   if (!window._pendingUpdate) return;
-  toast('Скачиваю...');
+  const btn = document.getElementById('update-apply-btn');
+  btn.disabled = true;
+  btn.textContent = 'Скачиваю обновление…';
+  document.getElementById('update-progress').style.display = 'block';
+  updateProgressUI({ pct: 0, mb: 0, total_mb: null });
   const res = await api().apply_update(window._pendingUpdate);
-  if (res && !res.ok) toast('Ошибка: ' + res.error, 'error');
+  // При успехе приложение перезапускается — сюда возвращаемся только с ошибкой.
+  if (res && !res.ok) {
+    toast('Ошибка: ' + res.error, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Обновить и перезапустить';
+    document.getElementById('update-progress').style.display = 'none';
+  }
+}
+
+// Прогресс загрузки обновления (событие update_progress из Python).
+function updateProgressUI(data) {
+  const bar = document.getElementById('update-progress-bar');
+  const pctEl = document.getElementById('update-progress-pct');
+  const label = document.getElementById('update-progress-label');
+  if (!bar || !pctEl || !label) return;
+  const pct = (data.pct === 0 || data.pct) ? data.pct : null;
+  if (pct !== null) {
+    bar.style.width = Math.min(pct, 100) + '%';
+    pctEl.textContent = pct + '%';
+  } else {
+    pctEl.textContent = '';
+  }
+  if (pct !== null && pct >= 100) {
+    // Скачано целиком — дальше подмена exe и перезапуск (без сети, быстро).
+    label.textContent = 'Устанавливаю и перезапускаю…';
+  } else if (data.mb != null) {
+    label.textContent = 'Скачиваю… ' + data.mb.toFixed(1)
+      + (data.total_mb ? ' / ' + data.total_mb.toFixed(1) : '') + ' МБ';
+  } else {
+    label.textContent = 'Скачиваю…';
+  }
 }
 
 async function restoreDefaults() {
@@ -5320,6 +5363,10 @@ window.onPyEvent = function(event, data) {
   }
   if (event === 'gpt_link_status') {
     toast(data.message || '');
+    return;
+  }
+  if (event === 'update_progress') {
+    updateProgressUI(data);
     return;
   }
   if (event === 'voice_test_done') {

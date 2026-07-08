@@ -167,17 +167,29 @@ def _restart_env() -> dict:
     }
 
 
-def download_and_apply(download_url: str) -> dict:
+def download_and_apply(download_url: str, progress_cb=None) -> dict:
     """Download the new build and apply it in place, then restart. Per-platform:
-    Windows swaps the single .exe; macOS replaces the .app bundle."""
+    Windows swaps the single .exe; macOS replaces the .app bundle.
+
+    progress_cb(written_bytes, expected_bytes) — вызывается по ходу загрузки
+    (expected_bytes может быть 0, если сервер не отдал Content-Length)."""
     if not IS_FROZEN:
         return {"ok": False, "error": "Обновление работает только в собранном приложении"}
     if sys.platform == "darwin":
-        return _apply_macos(download_url)
-    return _apply_windows(download_url)
+        return _apply_macos(download_url, progress_cb)
+    return _apply_windows(download_url, progress_cb)
 
 
-def _apply_windows(download_url: str) -> dict:
+def _report(progress_cb, written: int, expected: int):
+    """Дёрнуть колбэк прогресса, не давая его ошибке уронить обновление."""
+    if progress_cb:
+        try:
+            progress_cb(written, expected)
+        except Exception:
+            pass
+
+
+def _apply_windows(download_url: str, progress_cb=None) -> dict:
     """Download new exe, rename current → .old, put new in place, restart."""
     # INSTALL_EXE — путь к УСТАНОВЛЕННОМУ бинарнику. sys.executable в onefile
     # может указывать на распакованный во временную папку payload, замена
@@ -200,11 +212,13 @@ def _apply_windows(download_url: str) -> dict:
         r.raise_for_status()
         expected = int(r.headers.get("Content-Length") or 0)
         written = 0
+        _report(progress_cb, 0, expected)
         with open(new_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
                 if chunk:
                     f.write(chunk)
                     written += len(chunk)
+                    _report(progress_cb, written, expected)
 
         # Guard against a truncated download silently replacing the working exe.
         if written < 1_000_000 or (expected and written != expected):
@@ -276,7 +290,7 @@ def _extract_app_from_dmg(dmg_path: str, workdir: str) -> str | None:
         subprocess.run(["hdiutil", "detach", mp, "-force"], check=False)
 
 
-def _apply_macos(download_url: str) -> dict:
+def _apply_macos(download_url: str, progress_cb=None) -> dict:
     """Download the macOS build (.dmg, or legacy .zip), unpack the .app, strip
     the Gatekeeper quarantine (so an UNSIGNED build isn't blocked on relaunch),
     replace the running bundle in place, and relaunch with `open`."""
@@ -297,11 +311,13 @@ def _apply_macos(download_url: str) -> dict:
         r.raise_for_status()
         expected = int(r.headers.get("Content-Length") or 0)
         written = 0
+        _report(progress_cb, 0, expected)
         with open(dl_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
                 if chunk:
                     f.write(chunk)
                     written += len(chunk)
+                    _report(progress_cb, written, expected)
         if written < 1_000_000 or (expected and written != expected):
             return {"ok": False, "error": f"Загрузка повреждена ({written} из {expected or '?'} байт)"}
 
