@@ -113,8 +113,19 @@ jobs:
           mkdir -p dmg_stage
           cp -R dist/vizo.app dmg_stage/
           ln -s /Applications dmg_stage/Applications
-          hdiutil create -volname "vizo" -srcfolder dmg_stage -ov -format UDZO \
-            "vizo-mac-${{ matrix.label }}.dmg"
+          # hdiutil на раннерах GitHub флакает «Resource busy» (Spotlight/
+          # XProtect на мгновение лочит свежескопированный .app) — ретраим
+          # с паузой, одной попытки хватает не всегда (упало на v1.3.3).
+          for i in 1 2 3 4 5; do
+            if hdiutil create -volname "vizo" -srcfolder dmg_stage -ov -format UDZO \
+                "vizo-mac-${{ matrix.label }}.dmg"; then
+              exit 0
+            fi
+            echo "hdiutil create failed (attempt $i/5) — retry in 15s"
+            sleep 15
+          done
+          echo "hdiutil create failed after 5 attempts"
+          exit 1
       - uses: actions/upload-artifact@v4
         with:
           name: vizo-mac-${{ matrix.label }}
