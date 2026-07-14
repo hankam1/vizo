@@ -918,7 +918,10 @@ class ScenarioRunner:
                 model = (step.get("model") or "").strip()
                 # Пункты старого меню (до июля 2026) — маппим на ближайший
                 # смысл: Thinking = «думай дольше» → High; Auto = дефолт.
-                GPT_ALIASES = {"Auto": "", "Thinking": "High"}
+                # GPT-5.4 OpenAI отключает 23.07.2026 («Leaving on July 23»)
+                # — старые сценарии с ней переводим на GPT-5.5.
+                GPT_ALIASES = {"Auto": "", "Thinking": "High",
+                               "GPT-5.4": "GPT-5.5"}
                 model = GPT_ALIASES.get(model, model)
                 effort = (step.get("effort") or "").strip()
                 for value in (model, effort):

@@ -209,7 +209,7 @@ class GPTAutomation:
     # (radio Instant/Medium/High), в подменю — выбор модели (radio). Без
     # подписки пунктов может не быть — тогда выбор мягко пропускается.
     SUPPORTED_EFFORTS = ["Instant", "Medium", "High"]
-    SUPPORTED_MODELS = ["GPT-5.5", "GPT-5.4", "GPT-5.3", "o3"]
+    SUPPORTED_MODELS = ["GPT-5.6 Sol", "GPT-5.5", "GPT-5.3", "o3"]
 
     MODEL_MENU_TRIGGERS = [
         # Пилюля в композере (залогиненный аккаунт, июль 2026). Прячется,

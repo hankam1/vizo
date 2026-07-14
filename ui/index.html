@@ -4340,15 +4340,16 @@ const CLAUDE_EFFORTS = [
   { key: 'max',    label: 'Max' },
 ];
 // Меню «Intelligence» chatgpt.com (июль 2026, сверено на аккаунте Plus):
-// модель — в подменю (GPT-5.5/5.4/5.3/o3), скорость мышления — верхний
+// модель — в подменю (GPT-5.6 Sol/5.5/5.3/o3), скорость мышления — верхний
 // уровень (Instant/Medium/High). Пусто = не трогать. Выбор «мягкий»: если
 // пункта нет (аноним/фри), раннер предупреждает и продолжает как есть.
+// GPT-5.4 из списка убрана — OpenAI отключает её 23.07.2026.
 const GPT_MODELS = [
-  { key: '',        label: '— по умолчанию —' },
-  { key: 'GPT-5.5', label: 'GPT-5.5' },
-  { key: 'GPT-5.4', label: 'GPT-5.4' },
-  { key: 'GPT-5.3', label: 'GPT-5.3' },
-  { key: 'o3',      label: 'o3' },
+  { key: '',            label: '— по умолчанию —' },
+  { key: 'GPT-5.6 Sol', label: 'GPT-5.6 Sol' },
+  { key: 'GPT-5.5',     label: 'GPT-5.5' },
+  { key: 'GPT-5.3',     label: 'GPT-5.3' },
+  { key: 'o3',          label: 'o3' },
 ];
 const GPT_EFFORTS = [
   { key: '',        label: '— по умолчанию —' },
