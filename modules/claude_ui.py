@@ -224,7 +224,25 @@ class ClaudeAutomation:
             level = None
             effort = None
 
-        # 0. Открыть меню моделей — это заставляет DOM подтвердить свежее
+        # 0a. Быстрый путь без открытия меню: если кнопка-селектор УЖЕ
+        # показывает нужную модель и effort — не трогаем UI вообще. Это
+        # спасает от случая, когда base-ui-оверлей перекрывает страницу и
+        # клик по селектору не проходит («<body> intercepts pointer events»),
+        # хотя переключать по сути нечего. aria-label — источник правды;
+        # читаем дважды с паузой, чтобы не поймать недогидрированное
+        # состояние сразу после new_chat().
+        if model_name:
+            await self._neutralize_overlays()
+            m1, e1 = self._parse_model_label(await self._current_model_label() or "")
+            if m1 == model_name and (not level or e1 == level):
+                await asyncio.sleep(0.3)
+                m2, e2 = self._parse_model_label(await self._current_model_label() or "")
+                if m2 == model_name and (not level or e2 == level):
+                    log.info("Модель/effort уже '%s'/'%s' (меню не открывалось) "
+                             "— пропускаю переключение", m2, e2)
+                    return True
+
+        # 0b. Открыть меню моделей — это заставляет DOM подтвердить свежее
         # состояние (после new_chat() aria-label иногда отстаёт пока меню
         # не было открыто). Затем читаем актуальный aria-label кнопки.
         # На странице ровно один [data-testid="model-selector-dropdown"]
@@ -418,11 +436,24 @@ class ClaudeAutomation:
         for attempt in range(4):
             try:
                 # Меню ещё закрыто — блуждающий base-ui оверлей мог остаться
-                # от прошлого попапа и съесть клик по селектору.
+                # от прошлого попапа и съесть клик по селектору (Playwright
+                # это видит как «<body> intercepts pointer events»).
                 await self._neutralize_overlays()
-                await self.page.locator(
+                btn = self.page.locator(
                     '[data-testid="model-selector-dropdown"]'
-                ).first.click(timeout=5_000)
+                ).first
+                try:
+                    await btn.click(timeout=5_000)
+                except Exception as click_err:
+                    # Фон мог остаться инертным — обходим hit-testing:
+                    # force пропускает actionability-check, а JS-клик
+                    # диспатчит onClick напрямую, минуя перекрытие.
+                    log.info("_open_model_menu: обычный клик упал (%s) — "
+                             "пробую force/JS", click_err)
+                    try:
+                        await btn.click(timeout=3_000, force=True)
+                    except Exception:
+                        await btn.evaluate("el => el.click()")
                 await _human_pause(0.5, 0.9)
                 if await self.page.locator('[role="menu"]').count() > 0:
                     return True
@@ -1006,8 +1037,9 @@ class ClaudeAutomation:
         raise RuntimeError("Не удалось извлечь текст ответа")
 
     async def _neutralize_overlays(self):
-        """Disable invisible base-ui portals that intercept clicks.
-        Safe to call repeatedly — only touches inert presentation overlays."""
+        """Disable invisible base-ui portals that intercept clicks and
+        restore interactivity to the background the modal machinery froze.
+        Safe to call repeatedly — only touches inert/presentation overlays."""
         try:
             removed = await self.page.evaluate(
                 """
@@ -1022,6 +1054,26 @@ class ClaudeAutomation:
                             el.style.pointerEvents = 'none';
                             n++;
                         });
+                    }
+                    // Открывая модалку/попап, base-ui делает фон инертным:
+                    // на <body> (иногда <html>) вешается pointer-events:none
+                    // и/или атрибут inert. Кнопка селектора моделей наследует
+                    // это, и Playwright видит «<body> intercepts pointer
+                    // events» — клик не проходит, хотя портал уже погашен.
+                    // Возвращаем фон в интерактив (источник не важен —
+                    // проверяем computed-стиль, перекрываем инлайном).
+                    for (const el of [document.documentElement, document.body]) {
+                        if (!el) continue;
+                        try {
+                            if (getComputedStyle(el).pointerEvents === 'none') {
+                                el.style.pointerEvents = 'auto';
+                                n++;
+                            }
+                        } catch (e) {}
+                        if (el.hasAttribute && el.hasAttribute('inert')) {
+                            el.removeAttribute('inert');
+                            n++;
+                        }
                     }
                     return n;
                 }
