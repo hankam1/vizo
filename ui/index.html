@@ -4321,13 +4321,15 @@ function renderNode(step, idx) {
   `;
 }
 
-// Opus первым — он остаётся дефолтом для шагов без явной модели. Промо-модель
-// Fable 5 намеренно не предлагаем: пункт временный и скоро исчезнет из меню.
-const CLAUDE_MODELS = ['Opus 4.8', 'Sonnet 5', 'Haiku 4.5'];
+// Opus первым — он остаётся дефолтом для шагов без явной модели. Opus 5
+// (24.07.2026) заменил Opus 4.8 в пикере claude.ai. Промо-модель Fable 5
+// намеренно не предлагаем: пункт временный и может исчезнуть из меню.
+const CLAUDE_MODELS = ['Opus 5', 'Sonnet 5', 'Haiku 4.5'];
 // Устаревшие имена из сохранённых сценариев → актуальный пункт меню claude.ai.
 // Дублирует MODEL_ALIASES в scenarios.py: раннер мапит при выполнении, здесь
 // мапим при отрисовке, чтобы селект показывал то, что реально запустится.
-const CLAUDE_MODEL_ALIASES = { 'Opus 4.7': 'Opus 4.8', 'Opus 4.6': 'Opus 4.8',
+const CLAUDE_MODEL_ALIASES = { 'Opus 4.8': 'Opus 5', 'Opus 4.7': 'Opus 5',
+                               'Opus 4.6': 'Opus 5',
                                'Sonnet 4.6': 'Sonnet 5', 'Sonnet 4.5': 'Sonnet 5' };
 // effort_key → метка в UI. xhigh ("Extra") есть у Opus и Sonnet; у Haiku
 // настройка effort вообще игнорируется (нет trigger в подменю).

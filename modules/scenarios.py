@@ -83,7 +83,7 @@ def _build_tartaria_scenario():
             {"id": "t3", "type": "yt_transcript", "name": "Транскрипт",
              "inputs": {"url": "{url}"}, "output": "transcript"},
             {"id": "t4", "type": "claude_open", "name": "Открыть чат Claude",
-             "model": "Opus 4.8", "effort": "max"},
+             "model": "Opus 5", "effort": "max"},
             {"id": "t5", "type": "claude_prompt", "name": "Промпт адаптации",
              "prompt_template": full_prompt, "timeout": 300, "output": "adapted"},
             {"id": "t6", "type": "claude_ask", "name": "Ответ пользователя",
@@ -879,15 +879,17 @@ class ScenarioRunner:
                         idx, self._total_steps,
                         step.get("name") or label, m))
             if provider == "claude":
-                # Always explicitly switch to a model (defaults to Opus 4.8 for legacy
+                # Always explicitly switch to a model (defaults to Opus 5 for legacy
                 # scenarios without an explicit `model` field). Belt-and-suspenders:
                 # we'd rather click-through every time than trust the browser's
                 # current default. Effort выставляется в том же проходе через UI
                 # (low|medium|high|xhigh|max). Если effort пустой — не трогаем.
-                model = (step.get("model") or "Opus 4.8").strip()
+                model = (step.get("model") or "Opus 5").strip()
                 # Маппинг устаревших имён — после обновлений Claude UI они исчезают
                 # из дропдауна. Без алиаса set_model_and_effort молча не найдёт пункт.
-                MODEL_ALIASES = {"Opus 4.7": "Opus 4.8", "Opus 4.6": "Opus 4.8",
+                # Opus 5 (24.07.2026) заменил Opus 4.8 в пикере claude.ai.
+                MODEL_ALIASES = {"Opus 4.8": "Opus 5", "Opus 4.7": "Opus 5",
+                                 "Opus 4.6": "Opus 5",
                                  "Sonnet 4.6": "Sonnet 5", "Sonnet 4.5": "Sonnet 5"}
                 model = MODEL_ALIASES.get(model, model)
                 effort = (step.get("effort") or "").strip().lower() or None

@@ -191,14 +191,14 @@ class ClaudeAutomation:
     # ------------------------------------------------------------------
 
     # Display names of supported models (matches dropdown text in claude.ai UI).
-    # Состав меню на июль 2026 (проверено dom-dump'ом): Fable 5, Opus 4.8,
-    # Sonnet 5, Haiku 4.5. Sonnet 4.6 из меню исчез — алиас в scenarios.py
-    # мапит его на Sonnet 5 для старых сценариев. Fable 5 намеренно НЕ
-    # поддерживаем: это промо «Included until July 7», пункт скоро пропадёт
-    # из меню и сценарии с ним начали бы падать.
-    SUPPORTED_MODELS = ["Opus 4.8", "Sonnet 5", "Haiku 4.5"]
+    # Состав меню на конец июля 2026: Fable 5, Opus 5, Sonnet 5, Haiku 4.5.
+    # Opus 5 вышел 24.07.2026 и заменил Opus 4.8 в пикере — алиас в
+    # scenarios.py мапит Opus 4.8 (и старее) на Opus 5, как раньше Sonnet 4.6
+    # мапился на Sonnet 5. Fable 5 намеренно НЕ поддерживаем: это промо-пункт,
+    # может пропасть из меню и сценарии с ним начали бы падать.
+    SUPPORTED_MODELS = ["Opus 5", "Sonnet 5", "Haiku 4.5"]
     # Effort keys (data-testid suffixes) → отображаемый текст в подменю.
-    # xhigh ("Extra") есть у Opus 4.8 и Sonnet 5. У Haiku effort
+    # xhigh ("Extra") есть у Opus 5 и Sonnet 5. У Haiku effort
     # не настраивается вовсе (нет effort-menu-trigger).
     EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
 
@@ -207,7 +207,7 @@ class ClaudeAutomation:
         """Switch the current chat to the specified model AND effort in one
         round-trip through the dropdown. Both parameters are optional.
 
-        model_name: "Opus 4.8" | "Sonnet 5" | "Haiku 4.5" | None (не менять)
+        model_name: "Opus 5" | "Sonnet 5" | "Haiku 4.5" | None (не менять)
         effort:     "low" | "medium" | "high" | "xhigh" | "max" | None
                     (xhigh = "Extra"; есть у Opus и Sonnet, у Haiku
                     effort не настраивается)
@@ -400,7 +400,7 @@ class ClaudeAutomation:
 
     async def _current_model_label(self) -> str | None:
         """Текущее значение aria-label кнопки селектора моделей.
-        Пример: 'Model: Opus 4.8 High'. None если кнопка не найдена.
+        Пример: 'Model: Opus 5 High'. None если кнопка не найдена.
         На странице ровно один такой элемент (проверено dom-dump'ом)."""
         try:
             return await self.page.locator(
@@ -418,7 +418,7 @@ class ClaudeAutomation:
     }
 
     def _parse_model_label(self, label: str) -> tuple[str | None, str | None]:
-        """'Model: Opus 4.8 High' → ('Opus 4.8', 'high')"""
+        """'Model: Opus 5 High' → ('Opus 5', 'high')"""
         if not label or not label.lower().startswith("model:"):
             return None, None
         rest = label.split(":", 1)[1].strip()
