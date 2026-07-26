@@ -354,6 +354,10 @@ textarea::-webkit-scrollbar-thumb {
 .vstep.done .vstep-icon { background: var(--success); color: #fff; }
 .vstep.done .vstep-label { color: var(--ink-2); }
 .vstep-label { font-size: 14px; }
+/* Кликабельный шаг «YouTube URL» — ведёт на исходное видео запуска. */
+.vstep-link { cursor: pointer; }
+.vstep-link:hover { color: var(--accent) !important; text-decoration: underline; }
+.vstep-ext { font-size: 11px; margin-left: 4px; opacity: 0.65; }
 .vstep-skip {
   margin-left: auto; flex-shrink: 0;
   padding: 4px 12px; border-radius: 999px;
@@ -3081,6 +3085,9 @@ let currentStepIdx = 0;
 // показывать кнопку «Пропустить» на длинных шагах. Для translate-пайплайна
 // меты нет (там нет раннера сценариев) — кнопка не показывается.
 let currentStepMeta = [];
+// YouTube-ссылка просматриваемого запуска (введена при старте) — шаг
+// «YouTube URL» в списке становится кликабельным и открывает видео.
+let currentRunUrl = null;
 
 // ============================================================
 // RUN QUEUE + per-run status
@@ -3110,6 +3117,7 @@ function renderRunSnapshot(st) {
   if (!st) return;
   currentSteps = st.steps || [];
   currentStepMeta = st.step_meta || [];
+  currentRunUrl = st.url || null;
   const terminal = ['done','error','cancelled'].includes(st.status);
   const queued = (st.status === 'queued');
   currentStepIdx = (st.status === 'done') ? currentSteps.length
@@ -3614,12 +3622,23 @@ function renderSteps() {
     const skipBtn = (isActiveView && cls === 'active' && meta && SKIPPABLE_TYPES.has(meta.type))
       ? `<button class="vstep-skip" onclick="confirmSkip(${i})" title="Пропустить этот шаг — сценарий продолжится без его результата">Пропустить</button>`
       : '';
+    // Шаг «YouTube URL» — кликабельная ссылка на видео, с которого начали
+    // запуск (открывается в системном браузере через open_url).
+    const labelHtml = (meta && meta.type === 'yt_url' && currentRunUrl)
+      ? `<a class="vstep-label vstep-link" onclick="openRunVideo()" title="Открыть видео: ${escapeHtml(currentRunUrl)}">${escapeHtml(label)}<span class="vstep-ext">↗</span></a>`
+      : `<span class="vstep-label">${escapeHtml(label)}</span>`;
     return `<div class="vstep ${cls}">
       <span class="vstep-icon">${ic}</span>
-      <span class="vstep-label">${escapeHtml(label)}</span>${skipBtn}
+      ${labelHtml}${skipBtn}
     </div>`;
   }).join('');
   document.getElementById('step-list').innerHTML = html;
+}
+
+async function openRunVideo() {
+  if (!currentRunUrl || !api()) return;
+  const res = await api().open_url(currentRunUrl);
+  if (res && res.ok === false) toast('Не удалось открыть ссылку: ' + (res.error || 'неизвестная ошибка'), 'error');
 }
 
 function confirmSkip(i) {

@@ -1682,6 +1682,21 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def open_url(self, url: str):
+        """Открыть http(s)-ссылку в системном браузере (клик по шагу
+        «YouTube URL» на экране статуса запуска). Принимаем только
+        http/https, чтобы JS-мостик не мог запустить произвольный файл
+        или протокол."""
+        try:
+            u = (url or "").strip()
+            if not u.lower().startswith(("http://", "https://")):
+                return {"ok": False, "error": "Не похоже на ссылку"}
+            import webbrowser
+            webbrowser.open(u)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def read_log_tail(self, lines: int = 200):
         """Return the last N lines of the log file (for in-app viewing)."""
         try:
