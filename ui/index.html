@@ -4432,14 +4432,14 @@ function renderBody(step, idx) {
       <label class="vfield-label">Шаблон промпта</label>
       <textarea class="vtextarea" oninput="updateStep(${idx}, 'prompt_template', this.value)" placeholder="Используй {variable_name} для подстановки переменных">${escapeHtml(step.prompt_template || '')}</textarea>
     </div>`);
-    // File attachments (image examples for the AI)
+    // File attachments (images + text files for the AI)
     const files = Array.isArray(step.file_paths) ? step.file_paths : [];
     const chipsHtml = files.map((p, i) => renderFileChip(p, idx, i)).join('');
     const gptFilesNote = step.type === 'gpt_prompt'
       ? ' Для вложений нужен вход в аккаунт ChatGPT (аноним не принимает файлы).' : '';
     fields.push(`<div class="vfield">
-      <label class="vfield-label">Файлы-примеры (опционально)</label>
-      <div class="vfield-hint" style="margin-bottom:8px;">Картинки которые ${aiName} увидит вместе с этим промптом. Поддерживаются переменные вида <code style="font-family:'JetBrains Mono';color:var(--accent);">{thumbnail}</code>.${gptFilesNote}</div>
+      <label class="vfield-label">Вложения (опционально)</label>
+      <div class="vfield-hint" style="margin-bottom:8px;">Файлы, которые ${aiName} получит вместе с этим промптом: картинки-примеры (png, jpg, webp) и текст (txt, md, csv) — удобно для длинных справочных материалов, чтобы не раздувать сам шаблон. Поддерживаются переменные вида <code style="font-family:'JetBrains Mono';color:var(--accent);">{thumbnail}</code>.${gptFilesNote}</div>
       <div>${chipsHtml}</div>
       <button class="vbtn secondary" onclick="addPromptFiles(${idx})" style="height:36px;font-size:13px;">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
@@ -4577,15 +4577,22 @@ function updateStep(idx, key, value) {
 }
 
 // --- claude_prompt file attachments ---
+const TEXT_FILE_EXTS = ['txt', 'md', 'csv', 'json', 'log'];
+
 function renderFileChip(path, stepIdx, fileIdx) {
   const isVar = typeof path === 'string' && path.includes('{');
   let display = '?';
   if (typeof path === 'string') {
     display = isVar ? path : (path.split(/[\\/]/).pop() || path);
   }
-  const ico = isVar
-    ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12c0-4 2-6 6-6s6 2 6 6"/><path d="M6 12c0 4 2 6 6 6s6-2 6-6"/></svg>`
-    : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>`;
+  // Расширение берём из имени файла, а не из всего пути — точка может
+  // встретиться и в имени папки.
+  const ext = (!isVar && display.includes('.'))
+    ? display.split('.').pop().toLowerCase() : '';
+  const varIco = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12c0-4 2-6 6-6s6 2 6 6"/><path d="M6 12c0 4 2 6 6 6s6-2 6-6"/></svg>`;
+  const textIco = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6"/><path d="M9 17h4"/></svg>`;
+  const imgIco = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>`;
+  const ico = isVar ? varIco : (TEXT_FILE_EXTS.includes(ext) ? textIco : imgIco);
   return `<div class="vfile-chip">
     <span class="vfile-ico">${ico}</span>
     <span class="vfile-name" title="${escapeHtml(String(path))}">${escapeHtml(String(display))}</span>
@@ -4595,7 +4602,7 @@ function renderFileChip(path, stepIdx, fileIdx) {
 
 async function addPromptFiles(idx) {
   if (!api()) return;
-  const res = await api().pick_image_files();
+  const res = await api().pick_prompt_files();
   if (!res || !res.length) return;
   const step = editingScenario.steps[idx];
   if (!step) return;

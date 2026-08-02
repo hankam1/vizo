@@ -466,14 +466,24 @@ class Api:
         path = result[0]
         return {"path": path, "name": os.path.basename(path)}
 
-    def pick_image_files(self):
+    def pick_prompt_files(self):
+        """Вложения к промпту: картинки-примеры и текстовые файлы.
+
+        Claude/ChatGPT принимают не только картинки — .txt удобен, когда в
+        промпт надо занести длинный справочный материал, а не раздувать сам
+        шаблон."""
         import webview
         if not self._window:
             return None
         result = self._window.create_file_dialog(
             webview.OPEN_DIALOG,
             allow_multiple=True,
-            file_types=("Images (*.png;*.jpg;*.jpeg;*.webp)",),
+            file_types=(
+                "Картинки и текст (*.png;*.jpg;*.jpeg;*.webp;*.gif;*.txt;*.md;*.csv)",
+                "Картинки (*.png;*.jpg;*.jpeg;*.webp;*.gif)",
+                "Текстовые файлы (*.txt;*.md;*.csv)",
+                "Все файлы (*.*)",
+            ),
         )
         if not result:
             return []
