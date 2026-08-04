@@ -2106,8 +2106,11 @@ class Api:
                 async with session.get(fife_url) as r:
                     r.raise_for_status()
                     content = await r.read()
-                with open(out_path, "wb") as f:
+                # Атомарно: обрыв скачивания не должен оставить битый PNG.
+                tmp = out_path + ".tmp"
+                with open(tmp, "wb") as f:
                     f.write(content)
+                os.replace(tmp, out_path)
         self._progress("Готово!", 100, 2)
 
     async def _gen_video(self, out_dir: str, params: dict, mode: str, loop):
@@ -2142,8 +2145,10 @@ class Api:
                 if not os.path.exists(p):
                     raise RuntimeError(f"Файл не найден: {p}")
                 b64, mime = veo_api.file_to_base64(p)
-                # имя должно быть только латиницей
-                name = "".join(c for c in os.path.splitext(os.path.basename(p))[0] if c.isascii() and c.isalpha())
+                # Имя — только латиница и цифры. Цифры обязательны: сервер
+                # матчит референсы по именам, и без них scene1/scene2
+                # схлопнулись бы в одинаковое "scene".
+                name = "".join(c for c in os.path.splitext(os.path.basename(p))[0] if c.isascii() and c.isalnum())
                 if not name:
                     name = f"img{len(images) + 1}"
                 images.append({"name": name, "image_base64": b64, "mime_type": mime})

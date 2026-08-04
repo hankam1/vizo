@@ -1151,13 +1151,16 @@ class ScenarioRunner:
             total_steps = len(self.scenario.get("steps", []))
 
             # Concurrency: explicit override in step, else from user's plan.
+            concurrency = None
             concurrency_override = step.get("concurrency")
             if concurrency_override:
                 try:
                     concurrency = max(1, int(concurrency_override))
                 except (TypeError, ValueError):
-                    concurrency = veo_api.get_concurrency_limit(default=4)
-            else:
+                    concurrency = None
+            if concurrency is None:
+                # Блокирующий requests-вызов — только через executor, иначе
+                # подвесим event loop на время запроса к /account/info.
                 loop = asyncio.get_event_loop()
                 concurrency = await loop.run_in_executor(
                     None, veo_api.get_concurrency_limit, 4
