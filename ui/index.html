@@ -4517,9 +4517,13 @@ function renderBody(step, idx) {
     </div>`);
   }
   if (step.type === 'banana_one' || step.type === 'video_t2v') {
+    const t2vHint = step.type === 'video_t2v'
+      ? `<div class="vfield-hint">Каждая строка = 1 промпт = 1 видео. Можно подставить переменную со списком промптов, напр. <code style="font-family:'JetBrains Mono';color:var(--accent);">{video_prompts}</code> — сгенерируются все параллельно.</div>`
+      : '';
     fields.push(`<div class="vfield">
       <label class="vfield-label">Промпт</label>
       <textarea class="vtextarea" oninput="updateStep(${idx}, 'prompt', this.value)">${escapeHtml(step.prompt || '')}</textarea>
+      ${t2vHint}
     </div>`);
   }
   if (step.type === 'banana_batch') {

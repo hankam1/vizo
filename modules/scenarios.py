@@ -387,7 +387,7 @@ def validate(scenario: dict) -> list:
                 open_chats[prov] = False
 
         # Validate brace references {var} in templated fields.
-        for field in ("prompt_template", "filename", "source"):
+        for field in ("prompt_template", "prompt", "filename", "source"):
             val = step.get(field)
             if isinstance(val, str):
                 for ref in VAR_RE.findall(val):
@@ -1338,16 +1338,207 @@ class ScenarioRunner:
 
         elif t == "video_t2v":
             from modules import veo_api
-            prompt = substitute(step.get("prompt") or step.get("prompt_template") or "", self.vars)
+            raw_prompt = substitute(step.get("prompt") or step.get("prompt_template") or "", self.vars)
+            # Каждая непустая строка = отдельный промпт = отдельное видео.
+            # Так переменная со списком промптов (как в banana_batch) даёт
+            # пачку видео, а не одно видео со слепленным текстом.
+            prompts = [p.strip() for p in raw_prompt.splitlines() if p.strip()]
             loop = asyncio.get_event_loop()
-            task_id = await loop.run_in_executor(
-                None, veo_api.text_to_video,
-                prompt, step.get("aspect_ratio", "16:9"),
-                int(step.get("count", 1)), step.get("duration", "8s"),
-            )
-            paths = await self._fetch_video(task_id, step.get("name") or "Видео",
-                                            step_idx=idx)
-            self._set_output(step, paths)
+            aspect_ratio = step.get("aspect_ratio", "16:9")
+            count = int(step.get("count", 1))
+            duration = step.get("duration", "8s")
+            step_name = step.get("name") or "Видео"
+
+            if not prompts:
+                raise RuntimeError("Промпт для text→video пуст")
+
+            if len(prompts) == 1:
+                task_id = await loop.run_in_executor(
+                    None, veo_api.text_to_video,
+                    prompts[0], aspect_ratio, count, duration,
+                )
+                paths = await self._fetch_video(task_id, step_name, step_idx=idx)
+                self._set_output(step, paths)
+                return
+
+            total = len(prompts)
+            total_steps = len(self.scenario.get("steps", []))
+
+            concurrency = None
+            concurrency_override = step.get("concurrency")
+            if concurrency_override:
+                try:
+                    concurrency = max(1, int(concurrency_override))
+                except (TypeError, ValueError):
+                    concurrency = None
+            if concurrency is None:
+                concurrency = await loop.run_in_executor(
+                    None, veo_api.get_concurrency_limit, 4
+                )
+            log.info("video_t2v batch: %d prompts, concurrency=%d", total, concurrency)
+
+            sem = asyncio.Semaphore(concurrency)
+            done_count = 0
+            fail_count = 0
+            done_lock = asyncio.Lock()
+            results: list[list] = [[] for _ in prompts]
+            failures: list[tuple[int, str, str]] = []  # (index, prompt, error)
+
+            def _is_permanent(err: Exception) -> bool:
+                msg = str(err)
+                markers = ("INVALID_ARGUMENT", "BAD_REQUEST", "safety",
+                           "SAFETY", "blocked", "PROHIBITED")
+                return any(m in msg for m in markers)
+
+            async def _sleep_cancellable(sec: int):
+                for _ in range(sec * 2):
+                    self._check_cancel()
+                    self._check_skip(idx)
+                    await asyncio.sleep(0.5)
+
+            # Дозапуск: видео, скачанные прошлой попыткой, не рендерим заново —
+            # это самый дорогой шаг пайплайна. Сверяемся по префиксу vid_NNN_.
+            resume_ready: dict[int, list] = {}
+            if self._resume_state:
+                videos_dir = os.path.join(self.output_dir, "videos")
+                if os.path.isdir(videos_dir):
+                    for i in range(1, total + 1):
+                        prefix = f"vid_{i:03d}_"
+                        found = sorted(
+                            os.path.join(videos_dir, n)
+                            for n in os.listdir(videos_dir)
+                            if n.startswith(prefix) and n.endswith(".mp4")
+                            and os.path.getsize(os.path.join(videos_dir, n)) > 0
+                        )
+                        if found:
+                            resume_ready[i] = found
+                if resume_ready:
+                    log.info("Resume: %d/%d видео уже скачаны — пропускаю их",
+                             len(resume_ready), total)
+
+            async def _one(i: int, prompt: str):
+                nonlocal done_count, fail_count
+                ready = resume_ready.get(i)
+                if ready:
+                    results[i - 1] = ready
+                    async with done_lock:
+                        done_count += 1
+                    return
+                self._check_cancel()
+                self._check_skip(idx)
+
+                def _status(msg, _i=i):
+                    self.on_progress(
+                        idx, total_steps, step_name,
+                        f"{done_count}/{total} готово"
+                        + (f" ({fail_count} ошибок)" if fail_count else "")
+                        + f" • видео #{_i}: {msg}",
+                    )
+
+                # Видео — оплаченный рендер: транзиентные сбои ретраим с
+                # бэкоффом, но не бесконечно (макс. 4 попытки), чтобы вечно
+                # падающая задача не жгла кредиты.
+                attempt = 0
+                while True:
+                    attempt += 1
+                    try:
+                        async with sem:
+                            self._check_cancel()
+                            self._check_skip(idx)
+                            task_id = await loop.run_in_executor(
+                                None, veo_api.text_to_video,
+                                prompt, aspect_ratio, count, duration,
+                            )
+                            paths = await self._fetch_video(
+                                task_id, step_name, step_idx=idx,
+                                name_prefix=f"vid_{i:03d}", on_status=_status,
+                            )
+                            results[i - 1] = paths
+                        async with done_lock:
+                            done_count += 1
+                            self.on_progress(
+                                idx, total_steps, step_name,
+                                f"{done_count}/{total} готово"
+                                + (f" ({fail_count} ошибок)" if fail_count else ""),
+                            )
+                        return
+                    except (ScenarioCancelled, StepSkipped):
+                        raise
+                    except Exception as e:
+                        give_up = (_is_permanent(e) and attempt >= 2) or attempt >= 4
+                        if give_up:
+                            log.error(
+                                "video_t2v: prompt #%d failed after %d attempts: %s. "
+                                "Prompt: %.500s", i, attempt, e, prompt,
+                            )
+                            async with done_lock:
+                                fail_count += 1
+                                failures.append((i, prompt, str(e)))
+                                self.on_progress(
+                                    idx, total_steps, step_name,
+                                    f"{done_count}/{total} готово ({fail_count} ошибок)",
+                                )
+                            return
+                        wait = (5, 15, 30)[min(attempt - 1, 2)]
+                        log.warning(
+                            "video_t2v: prompt #%d failed (attempt %d): %s — retry in %ds. "
+                            "Prompt: %.200s", i, attempt, e, wait, prompt,
+                        )
+                        async with done_lock:
+                            self.on_progress(
+                                idx, total_steps, step_name,
+                                f"{done_count}/{total} готово"
+                                + (f" ({fail_count} ошибок)" if fail_count else "")
+                                + f" • видео #{i}: попытка {attempt}, ждём {wait}с…",
+                            )
+                        await _sleep_cancellable(wait)
+
+            self.on_progress(idx, total_steps, step_name,
+                             f"0/{total} (параллельно: {concurrency})")
+            tasks = [
+                asyncio.create_task(_one(i, p))
+                for i, p in enumerate(prompts, 1)
+            ]
+            try:
+                await asyncio.gather(*tasks)
+            except ScenarioCancelled:
+                for tk in tasks:
+                    if not tk.done():
+                        tk.cancel()
+                raise
+            except StepSkipped:
+                # Пропуск шага: глушим оставшиеся рендеры, но скачанные видео
+                # сохраняем как результат — они уже оплачены.
+                for tk in tasks:
+                    if not tk.done():
+                        tk.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                partial = [p for sub in results for p in sub]
+                log.warning("video_t2v: пропущен пользователем (%d/%d видео готово)",
+                            len(partial), total)
+                self.on_progress(idx, total_steps, step_name,
+                                 f"Пропущен ({len(partial)}/{total} готово)")
+                self._set_output(step, partial)
+                return
+
+            all_paths = [p for sub in results for p in sub]
+
+            if failures:
+                log.warning("video_t2v: finished with %d/%d failures",
+                            len(failures), total)
+                if not all_paths:
+                    first_idx, _, first_err = failures[0]
+                    raise RuntimeError(
+                        f"Все {total} видео не сгенерировались. "
+                        f"Первая ошибка (промпт #{first_idx}): {first_err}"
+                    )
+                self.on_progress(
+                    idx, total_steps, step_name,
+                    f"Готово {len(all_paths)}/{total}. {len(failures)} промптов "
+                    f"не удалось — см. vizo.log",
+                )
+
+            self._set_output(step, all_paths)
 
         elif t == "video_i2v":
             from modules import veo_api
@@ -1469,12 +1660,18 @@ class ScenarioRunner:
         return paths
 
     async def _fetch_video(self, task_id: str, label: str = "Видео",
-                           step_idx: int = None) -> list:
+                           step_idx: int = None, name_prefix: str = None,
+                           on_status=None) -> list:
         """Poll the VeoNonStop task until completion. If the user cancels
         during the wait, we call /video/cancel/{task_id} server-side so no
         more compute / credits are spent, then propagate the cancellation.
         Пропуск шага (step_idx) делает то же самое, но поднимает StepSkipped —
         сценарий продолжается дальше без этого видео.
+        name_prefix задаёт детерминированные имена файлов (prefix_NN.mp4) —
+        обязателен при параллельном батче, где нумерация по len(os.listdir)
+        привела бы к гонке и перезаписи чужих файлов. on_status, если задан,
+        получает строку статуса вместо прямого вызова self.on_progress —
+        батч агрегирует прогресс нескольких задач в одну строку.
         """
         from modules import veo_api
         loop = asyncio.get_event_loop()
@@ -1519,8 +1716,11 @@ class ScenarioRunner:
                 prog = data.get("progress") or {}
                 done = prog.get("completed") or 0
                 total = prog.get("total") or 1
-                self.on_progress(self._current_idx, self._total_steps,
-                                 label, f"{status} {done}/{total}")
+                if on_status:
+                    on_status(f"{status} {done}/{total}")
+                else:
+                    self.on_progress(self._current_idx, self._total_steps,
+                                     label, f"{status} {done}/{total}")
                 if status == "COMPLETED":
                     result = data
                     break
@@ -1542,11 +1742,14 @@ class ScenarioRunner:
         videos = result.get("videos") or []
         videos_dir = os.path.join(self.output_dir, "videos")
         os.makedirs(videos_dir, exist_ok=True)
-        existing = len(os.listdir(videos_dir))
+        existing = 0 if name_prefix else len(os.listdir(videos_dir))
         paths = []
         for i in range(len(videos)):
             self._check_cancel()
-            path = os.path.join(videos_dir, f"video_{existing + i + 1:02d}.mp4")
+            if name_prefix:
+                path = os.path.join(videos_dir, f"{name_prefix}_{i + 1:02d}.mp4")
+            else:
+                path = os.path.join(videos_dir, f"video_{existing + i + 1:02d}.mp4")
             await loop.run_in_executor(None, veo_api.download_video, task_id, path, i)
             paths.append(path)
         return paths
