@@ -1,10 +1,16 @@
 @echo off
 REM Build vi.log with Nuitka (compiled to native code)
-REM Requires: pip install nuitka ordered-set
+REM Requires: py -3.12 -m pip install -r requirements.txt nuitka ordered-set
+REM
+REM Python 3.12 explicitly: the system `py` resolves to 3.14, which Nuitka
+REM cannot compile against (C errors in the GC headers — _gc_runtime_state has
+REM no `young` field). MinGW64 is used because there is no MSVC on the machine;
+REM Nuitka downloads it itself thanks to --assume-yes-for-downloads.
+set PY=py -3.12
 
 REM Version single-sourced from config.py — the updater compares config.VERSION
 REM against the GitHub release tag, so the exe metadata must match it.
-for /f "delims=" %%v in ('py -c "import config; print(config.VERSION)"') do set APPVER=%%v
+for /f "delims=" %%v in ('%PY% -c "import config; print(config.VERSION)"') do set APPVER=%%v
 if "%APPVER%"=="" (
   echo ERROR: could not read VERSION from config.py
   pause
@@ -13,7 +19,7 @@ if "%APPVER%"=="" (
 
 REM Icon: generate if missing; build without icon as a last resort.
 if not exist logo.ico (
-  if exist logo_256.png py make_icon.py
+  if exist logo_256.png %PY% make_icon.py
 )
 set ICON_FLAG=--windows-icon-from-ico=logo.ico
 if not exist logo.ico (
@@ -25,9 +31,10 @@ echo Building vizo %APPVER% with Nuitka...
 echo This will take 10-20 minutes (first build is slow; subsequent builds are faster).
 echo.
 
-py -m nuitka ^
+%PY% -m nuitka ^
   --standalone ^
   --onefile ^
+  --mingw64 ^
   --windows-console-mode=disable ^
   --disable-plugin=pywebview ^
   --include-package=webview ^

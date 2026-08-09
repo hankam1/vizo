@@ -13,7 +13,10 @@ REM    1) Bump VERSION in config.py  (e.g. "1.1.0" -> "1.2.0")
 REM    2) Run this script:           release.bat
 REM ============================================================
 
-for /f "delims=" %%v in ('py -c "import config; print(config.VERSION)"') do set APPVER=%%v
+REM Python 3.12 explicitly — see the note in build.bat about the system `py`.
+set PY=py -3.12
+
+for /f "delims=" %%v in ('%PY% -c "import config; print(config.VERSION)"') do set APPVER=%%v
 if "%APPVER%"=="" (
   echo ERROR: could not read VERSION from config.py
   pause & exit /b 1
