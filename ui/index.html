@@ -2290,12 +2290,12 @@ audio { width: 100%; }
 
         <!-- ===== test (VoiceGen, qw1voicegencore.pro) ===== -->
         <div id="voice-voicegen-fields" style="display:none;">
-          <div class="vfield">
+          <div class="vfield" id="voice-vg-f-voiceid">
             <label class="vfield-label">Voice ID</label>
             <input class="vinput" id="voice-edit-vg-voiceid" placeholder="ID из каталога голосов">
             <div class="vfield-hint">ID голоса из каталога test (включая личные клоны). Сюда же можно вставить ElevenLabs ID — сервис импортирует голос сам.</div>
           </div>
-          <div class="vfield">
+          <div class="vfield" id="voice-vg-f-model">
             <label class="vfield-label">Модель</label>
             <select class="vselect" id="voice-edit-vg-engine" onchange="applyVgEngineUI()">
               <option value="elevenLabsV3">elevenLabsV3</option>
@@ -2309,8 +2309,11 @@ audio { width: 100%; }
           </div>
           <div class="vfield">
             <label class="vfield-label">ID шаблона (необязательно)</label>
-            <input class="vinput" id="voice-edit-vg-template" placeholder="пусто — использовать настройки ниже">
-            <div class="vfield-hint">Шаблон из Telegram-бота сервиса: подставит голос, модель и настройки. Текст и имя файла всё равно берутся отсюда.</div>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input class="vinput" id="voice-edit-vg-template" placeholder="пусто — использовать настройки ниже" oninput="applyVgTemplateUI()" style="flex:1;">
+              <button class="vbtn secondary" onclick="pickTemplate('voicegen','voice-edit-vg-template')">Загрузить</button>
+            </div>
+            <div class="vfield-hint">Шаблон из Telegram-бота сервиса — бот его ID не показывает, «Загрузить» возьмёт список по API. Шаблон задаёт голос, модель, настройки и разбивку; из vizo идут только текст, имя файла и число потоков.</div>
           </div>
         </div>
 
@@ -2318,8 +2321,11 @@ audio { width: 100%; }
         <div id="voice-lumean-fields" style="display:none;">
           <div class="vfield">
             <label class="vfield-label">ID шаблона</label>
-            <input class="vinput" id="voice-edit-lum-template" placeholder="123e4567-e89b-12d3-a456-426614174000">
-            <div class="vfield-hint">UUID шаблона Lumean (создаётся в веб-кабинете). У Lumean голос задаётся только шаблоном — без него заказ не создать.</div>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input class="vinput" id="voice-edit-lum-template" placeholder="123e4567-e89b-12d3-a456-426614174000" style="flex:1;">
+              <button class="vbtn secondary" onclick="pickTemplate('lumean','voice-edit-lum-template')">Загрузить</button>
+            </div>
+            <div class="vfield-hint">UUID шаблона Lumean (создаётся в веб-кабинете). У Lumean голос задаётся только шаблоном — без него заказ не создать. «Загрузить» подтянет список по ключу (нужно право templates.read).</div>
           </div>
           <div class="vfield">
             <label class="vfield-label">Voice ID — оверрайд (необязательно)</label>
@@ -2347,10 +2353,11 @@ audio { width: 100%; }
           <div class="vfield">
             <label class="vfield-label">Режим нарезки</label>
             <select class="vselect" id="voice-edit-lum-mode">
+              <option value="">— из шаблона —</option>
               <option value="default">default — сплошной рез по размеру</option>
               <option value="paragraph">paragraph — абзац как отдельная единица</option>
             </select>
-            <div class="vfield-hint">Абзацный режим влияет на цену: минимальный тарифицируемый объём считается на КАЖДЫЙ абзац.</div>
+            <div class="vfield-hint">Абзацный режим влияет на цену: минимальный тарифицируемый объём считается на КАЖДЫЙ абзац. «default» отправляется явно — им можно выключить абзацный режим, включённый в шаблоне.</div>
           </div>
           <div class="vfield" style="display:flex;align-items:center;gap:12px;">
             <label class="vfield-label" style="margin:0;">Скачивать субтитры (.srt/.vtt)</label>
@@ -2397,6 +2404,7 @@ audio { width: 100%; }
           </select>
           <div class="vfield-hint">Пресет ЗАМЕНЯЕТ ручные настройки ниже. Пусто — шлём ползунки.</div>
         </div>
+        <div class="vfield-hint" id="voice-vg-template-note" style="display:none;">Задан ID шаблона — голос, модель, её настройки, акцент и разбивка берутся из него, поэтому эти поля скрыты. Пресет живости остаётся: по доке сервиса он переопределяет настройки шаблона.</div>
         <div id="voice-vg-manual">
           <div class="vfield" data-vg-param="speed">
             <label class="vfield-label">Speed · Скорость</label>
@@ -2433,12 +2441,12 @@ audio { width: 100%; }
           <div class="vfsec-num">3</div>
           <div class="vfsec-title">Разбиение и потоки</div>
         </div>
-        <div class="vfield">
+        <div class="vfield" id="voice-vg-f-chunk">
           <label class="vfield-label">Chunk Size</label>
           <input class="vinput" type="number" id="voice-edit-vg-chunk" min="100" max="5000" step="100" placeholder="пусто — на усмотрение сервиса">
           <div class="vfield-hint">Сервер может урезать значение своим максимумом. Для иероглифических языков он сам берёт чанк меньше.</div>
         </div>
-        <div class="vfield">
+        <div class="vfield" id="voice-vg-f-delay">
           <label class="vfield-label">Пауза между чанками, сек</label>
           <input class="vinput" type="number" id="voice-edit-vg-delay" min="0" max="10" step="0.1" placeholder="пусто — без паузы">
         </div>
@@ -5306,7 +5314,7 @@ async function newVoice() {
     lum_voice_id: '',
     lum_model_id: '',
     lum_language_code: '',
-    lum_generation_mode: 'default',
+    lum_generation_mode: '',
     lum_override_settings: false,
     lum_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.0, use_speaker_boost: true, speed: 1.0 },
     lum_download_subtitles: false,
@@ -5359,6 +5367,22 @@ const VG_ENGINE_PARAMS = {
 // У fish/auto/panda/starfish скорость шире и шагом 5 (см. таблицу в доке).
 const VG_WIDE_SPEED = ['fish', 'auto', 'panda', 'starfish'];
 
+// Шаблон test задаёт голос, модель, её настройки и разбивку — досылать их из
+// vizo нельзя, они перебили бы шаблон. Поэтому при заполненном ID шаблона поля,
+// которые всё равно не уедут, скрыты: из запроса идут только текст, имя файла,
+// потоки и (по доке) осознанно выбранный пресет.
+function applyVgTemplateUI() {
+  const byTemplate = !!document.getElementById('voice-edit-vg-template').value.trim();
+  for (const id of ['voice-vg-f-voiceid', 'voice-vg-f-model', 'voice-vg-manual',
+                    'voice-vg-accent-field', 'voice-vg-f-chunk', 'voice-vg-f-delay']) {
+    const el = document.getElementById(id);
+    if (el && byTemplate) el.style.display = 'none';
+  }
+  const note = document.getElementById('voice-vg-template-note');
+  if (note) note.style.display = byTemplate ? '' : 'none';
+  return byTemplate;
+}
+
 function applyVgEngineUI() {
   const eng = document.getElementById('voice-edit-vg-engine').value;
   const allowed = VG_ENGINE_PARAMS[eng] || ['speed'];
@@ -5376,6 +5400,45 @@ function applyVgEngineUI() {
   speed.step = wide ? 5 : 1;
   updateSlider(speed);
   document.getElementById('voice-vg-accent-field').style.display = eng === 'elevenLabsV3' ? '' : 'none';
+  applyVgTemplateUI();
+}
+
+// Ни бот test, ни кабинет Lumean не показывают ID шаблона — забираем список по
+// API и даём выбрать, чтобы не заставлять пользователя ходить в curl.
+async function pickTemplate(engine, inputId) {
+  const s = await api().load_settings();
+  const keyErr = missingVoiceKey([engine], s);
+  if (keyErr) return toast(keyErr, 'error');
+  toast('Загружаю шаблоны…');
+  const res = await api().list_voice_templates(engine);
+  if (!res || !res.ok) return toast('Ошибка: ' + ((res && res.error) || 'нет ответа'), 'error');
+  const list = res.templates || [];
+  if (!list.length) {
+    return toast(`Шаблонов не найдено — создай шаблон в ${voiceEngineName(engine)} и повтори`, 'error');
+  }
+  showModal(`<div class="vmodal" style="width:520px;">
+    <div class="vmodal-titlebar">
+      <h3>Шаблоны · ${escapeHtml(voiceEngineName(engine))}</h3>
+      <button class="vmodal-close" onclick="closeModal()" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="vactions" style="max-height:50vh;overflow-y:auto;">
+      ${list.map(t => `
+        <button class="vkebab-item" onclick="applyTemplateChoice('${escapeHtml(inputId)}','${escapeHtml(t.id)}')">
+          <span class="vkebab-item-label" style="display:flex;flex-direction:column;align-items:flex-start;gap:2px;">
+            <span>${escapeHtml(t.name)}</span>
+            <span class="vmono" style="font-size:11px;opacity:0.65;">${escapeHtml(t.id)}${t.note ? ' · ' + escapeHtml(t.note) : ''}</span>
+          </span>
+        </button>`).join('')}
+    </div>
+  </div>`);
+}
+
+function applyTemplateChoice(inputId, templateId) {
+  const el = document.getElementById(inputId);
+  if (el) el.value = templateId;
+  closeModal();
+  if (inputId === 'voice-edit-vg-template') applyVgTemplateUI();
+  toast('Шаблон выбран', 'success');
 }
 
 function toggleLumOverride(el) {
@@ -5430,7 +5493,7 @@ function fillVoiceEditor() {
   document.getElementById('voice-edit-lum-voiceid').value = v.lum_voice_id || '';
   document.getElementById('voice-edit-lum-model').value = v.lum_model_id || '';
   document.getElementById('voice-edit-lum-lang').value = v.lum_language_code || '';
-  document.getElementById('voice-edit-lum-mode').value = v.lum_generation_mode || 'default';
+  document.getElementById('voice-edit-lum-mode').value = v.lum_generation_mode || '';
   setSwitch('voice-edit-lum-subs', !!v.lum_download_subtitles);
   setSwitch('voice-edit-lum-payg', !!v.lum_allow_payg);
   setSwitch('voice-edit-lum-override', !!v.lum_override_settings);

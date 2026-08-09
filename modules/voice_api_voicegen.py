@@ -78,65 +78,118 @@ def _int_or_none(value):
 
 
 def build_payload(text: str, voice: dict, filename: str) -> dict:
-    """Собирает тело POST /tasks из полей голоса (префикс `vg_`)."""
-    engine = str(voice.get("vg_voice_engine") or "elevenLabsV3")
-    payload = {
-        "text": text,
-        "filename": filename,
-        "voice_engine": engine,
-    }
+    """Собирает тело POST /tasks из полей голоса (префикс `vg_`).
 
+    Два взаимоисключающих режима:
+
+    * **по шаблону** (`vg_template_id`) — шаблон из Telegram-бота уже содержит
+      голос, модель, её настройки, пресет, режим разбивки, размер чанка и паузу.
+      Досылать их из vizo нельзя: они перебили бы шаблон, ради которого его и
+      заводили. Из запроса берутся только текст, имя файла и число потоков —
+      ровно как написано в доке. Исключение — `settings_preset`: дока прямо
+      говорит, что пресет из запроса переопределяет настройки шаблона, так что
+      осознанно выбранный пресет отправляем.
+    * **по настройкам** (`vg_voice_id`) — голос собирается здесь целиком.
+    """
     template_id = (voice.get("vg_template_id") or "").strip()
     voice_id = (voice.get("vg_voice_id") or "").strip()
-    if template_id:
-        payload["template_id"] = template_id
-    if voice_id:
-        payload["voice_id"] = voice_id
     if not template_id and not voice_id:
         raise RuntimeError(
             f"Для озвучки «{SERVICE_NAME}» нужен voice_id из каталога или ID шаблона"
         )
 
-    # Пресет живости заменяет ручные настройки — шлём что-то одно.
+    payload = {"text": text, "filename": filename}
     preset = (voice.get("vg_settings_preset") or "").strip()
-    if preset:
-        payload["settings_preset"] = preset
+
+    if template_id:
+        payload["template_id"] = template_id
+        if preset:
+            payload["settings_preset"] = preset
     else:
-        allowed = ENGINE_PARAMS.get(engine, ("speed",))
-        src = voice.get("vg_settings") or {}
-        vs = {}
-        for key in allowed:
-            if key == "use_speaker_boost":
-                if "use_speaker_boost" in src:
-                    vs["use_speaker_boost"] = bool(src["use_speaker_boost"])
-                continue
-            val = _int_or_none(src.get(key))
-            if val is not None:
-                vs[key] = val
-        if vs:
-            payload["voice_engine_settings"] = vs
+        engine = str(voice.get("vg_voice_engine") or "elevenLabsV3")
+        payload["voice_engine"] = engine
+        payload["voice_id"] = voice_id
+        # Пресет живости заменяет ручные настройки — шлём что-то одно.
+        if preset:
+            payload["settings_preset"] = preset
+        else:
+            allowed = ENGINE_PARAMS.get(engine, ("speed",))
+            src = voice.get("vg_settings") or {}
+            vs = {}
+            for key in allowed:
+                if key == "use_speaker_boost":
+                    if "use_speaker_boost" in src:
+                        vs["use_speaker_boost"] = bool(src["use_speaker_boost"])
+                    continue
+                val = _int_or_none(src.get(key))
+                if val is not None:
+                    vs[key] = val
+            if vs:
+                payload["voice_engine_settings"] = vs
 
-    # Акцент — только у elevenLabsV3, иначе сервис отвечает 400.
-    accent = (voice.get("vg_accent") or "").strip()
-    if accent and engine == ACCENT_ENGINE:
-        payload["accent"] = accent
+        # Акцент — только у elevenLabsV3, иначе сервис отвечает 400.
+        accent = (voice.get("vg_accent") or "").strip()
+        if accent and engine == ACCENT_ENGINE:
+            payload["accent"] = accent
 
+        chunk_size = _int_or_none(voice.get("vg_chunk_size"))
+        if chunk_size:
+            payload["chunk_size"] = chunk_size
+        delay = voice.get("vg_delay_between_chunks")
+        if delay not in (None, ""):
+            try:
+                payload["delay_between_chunks"] = float(delay)
+            except (TypeError, ValueError):
+                pass
+
+    # Поля уровня задачи — работают в обоих режимах.
     if voice.get("vg_include_timestamps"):
         payload["include_timestamps"] = True
-
-    chunk_size = _int_or_none(voice.get("vg_chunk_size"))
-    if chunk_size:
-        payload["chunk_size"] = chunk_size
     threads = _int_or_none(voice.get("vg_thread_count"))
     if threads:
         payload["thread_count"] = threads
-    delay = voice.get("vg_delay_between_chunks")
-    if delay not in (None, ""):
-        try:
-            payload["delay_between_chunks"] = float(delay)
-        except (TypeError, ValueError):
-            pass
     return payload
+
+
+def list_templates() -> list:
+    """Шаблоны из Telegram-бота сервиса — их ID бот не показывает, отдаёт API.
+
+    Возвращает `[{id, name, note}]` для выбора в UI.
+    """
+    r = requests.get(
+        f"{VOICE_VOICEGEN_BASE}/api/v1/client/templates",
+        headers=_headers(),
+        timeout=HTTP_TIMEOUT_SEC,
+    )
+    if r.status_code >= 400:
+        raise _api_error(r, "Ошибка загрузки шаблонов")
+    data = r.json()
+    # Форма ответа в доке не зафиксирована — принимаем и голый список,
+    # и любую из привычных обёрток.
+    if isinstance(data, dict):
+        for key in ("templates", "data", "items", "result"):
+            if isinstance(data.get(key), list):
+                data = data[key]
+                break
+        else:
+            data = []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for t in data:
+        if not isinstance(t, dict):
+            continue
+        tid = t.get("id") or t.get("template_id") or t.get("uuid")
+        if not tid:
+            continue
+        note = " · ".join(str(t[k]) for k in ("voice_name", "voice_engine", "model")
+                          if t.get(k))
+        out.append({
+            "id": str(tid),
+            "name": str(t.get("name") or t.get("title") or tid),
+            "note": note,
+        })
+    return out
 
 
 def _api_error(r, action: str) -> Exception:

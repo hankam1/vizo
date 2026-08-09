@@ -36,6 +36,9 @@ MAX_CONSECUTIVE_POLL_FAILURES = 20
 # чанков, прежде чем сдаться. Повтор бесплатен (переиспользует залоченный
 # остаток), но бесконечно крутить его нельзя.
 MAX_RETRY_ROUNDS = 2
+# Сколько опросов ждём, если заказ ещё `partially_completed`, но незавершённых
+# чанков уже нет: после повтора идёт склейка, и статус заказа отстаёт.
+MAX_IDLE_POLLS = 24
 
 # OrderStatus: created → pending → in_progress → completed. Терминальные
 # неуспешные — failed / compensated / cancelled. partially_completed
@@ -74,6 +77,11 @@ REASON_RU = {
     "token_quota_exceeded": "исчерпана токен-квота API-ключа",
     "service_not_found": "сервис не найден или не активен",
     "quote_mismatch": "цена доплаты изменилась",
+    # Причины пропуска чанка в ответе retry-failed.
+    "superseded": "у чанка уже есть успешная версия",
+    "active_retry_exists": "повтор уже идёт",
+    "max_attempts_reached": "исчерпан лимит попыток (5)",
+    "insufficient_funds": "не осталось залоченного остатка",
 }
 
 
@@ -163,11 +171,63 @@ def build_config_override(voice: dict) -> dict:
     override = {}
     if tts:
         override["tts_settings"] = tts
-    # generation_mode лежит в КОРНЕ конфига, не внутри tts_settings.
+    # generation_mode лежит в КОРНЕ конфига, не внутри tts_settings. Пустое
+    # значение = «как в шаблоне»; явный `default` шлём, чтобы можно было
+    # ВЫКЛЮЧИТЬ абзацный режим, включённый в шаблоне.
     mode = (voice.get("lum_generation_mode") or "").strip()
-    if mode and mode != "default":
+    if mode:
         override["generation_mode"] = mode
     return override
+
+
+def list_templates() -> list:
+    """Шаблоны пользователя для выбора ID в UI: `[{id, name, note}]`.
+
+    `GET /templates` отдаёт только корень (`folder_id = null`), поэтому идём
+    через `browse` и спускаемся в папки на один уровень — иначе шаблон, убранный
+    в папку, в списке не появится.
+    """
+    def browse(folder_id=None) -> dict:
+        params = {"per_page": 100}
+        if folder_id is not None:
+            params["folder_id"] = folder_id
+        r = requests.get(
+            f"{VOICE_LUMEAN_BASE}/templates/browse",
+            params=params,
+            headers=_headers(),
+            timeout=HTTP_TIMEOUT_SEC,
+        )
+        if r.status_code >= 400:
+            raise _api_error(r, "Ошибка загрузки шаблонов")
+        return _body(r).get("data") or {}
+
+    out, folders = [], []
+    for item in (browse().get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "folder":
+            folders.append(item)
+        elif item.get("id"):
+            out.append(item)
+    # Один уровень вложенности; глубже не лезем, чтобы не устроить веер запросов.
+    for folder in folders[:20]:
+        try:
+            for item in (browse(folder.get("id")).get("items") or []):
+                if isinstance(item, dict) and item.get("type") == "template" and item.get("id"):
+                    item["_folder"] = folder.get("name")
+                    out.append(item)
+        except Exception:
+            continue
+
+    result = []
+    for t in out:
+        note = " · ".join(x for x in (t.get("service_key"), t.get("_folder")) if x)
+        result.append({
+            "id": str(t.get("id")),
+            "name": str(t.get("name") or t.get("id")),
+            "note": note,
+        })
+    return result
 
 
 def _post_order(payload: dict) -> requests.Response:
@@ -284,16 +344,70 @@ def _status_text(order: dict) -> str:
     return label
 
 
-def _item_counts(order: dict) -> dict:
-    counts = {}
+ACTIVE_ITEM_STATUSES = {"pending", "processing"}
+
+
+def _walk_items(order: dict):
+    """Плоский обход чанков заказа вместе с их повторами.
+
+    Повторы приходят и вложенными в `retries`, и отдельными записями верхнего
+    уровня с `parent_item_id` — обходим оба варианта.
+    """
     for item in order.get("items") or []:
-        # Считаем только исходные чанки: записи retry/regeneration — это версии
-        # тех же чанков, они дублировали бы статистику.
+        if not isinstance(item, dict):
+            continue
+        yield item
+        for retry in item.get("retries") or []:
+            if isinstance(retry, dict):
+                yield retry
+
+
+def _order_progress(order: dict) -> dict:
+    """Что реально происходит с чанками частично готового заказа.
+
+    `active` считается по ВСЕМ записям, включая повторы: если посмотреть только
+    на исходные чанки, уже запущенный повтор не виден (сам чанк остаётся
+    `failed`), и мы бы дёргали retry-failed снова и снова — сервис такие
+    пропускает с `active_retry_exists`, а мы бы сожгли лимит раундов и сдались,
+    хотя повтор был в полёте.
+
+    `stuck_failed` / `flagged` — сбойные чанки, у которых нет ни успешного, ни
+    идущего повтора; только они требуют действий.
+    """
+    items = list(_walk_items(order))
+    children = {}
+    for item in items:
+        pid = item.get("parent_item_id")
+        if pid:
+            children.setdefault(str(pid), []).append(item)
+
+    active = sum(1 for it in items
+                 if str(it.get("status", "")).lower() in ACTIVE_ITEM_STATUSES)
+    healthy = ACTIVE_ITEM_STATUSES | {"completed"}
+    stuck_failed = flagged = 0
+    for item in items:
         if item.get("item_type") not in (None, "chunk"):
             continue
-        st = str(item.get("status", "")).lower()
-        counts[st] = counts.get(st, 0) + 1
-    return counts
+        status = str(item.get("status", "")).lower()
+        if status not in ("failed", "policy_flagged"):
+            continue
+        kids = children.get(str(item.get("id")), []) + list(item.get("retries") or [])
+        if any(str(k.get("status", "")).lower() in healthy for k in kids):
+            continue  # повтор уже идёт или успешно закрыл этот чанк
+        if status == "failed":
+            stuck_failed += 1
+        else:
+            flagged += 1
+    return {"active": active, "stuck_failed": stuck_failed, "flagged": flagged}
+
+
+def _skipped_summary(plan: dict) -> str:
+    """Причины пропуска из ответа retry-failed — строим по машинному `reason`."""
+    reasons = {}
+    for item in plan.get("skipped") or []:
+        reason = str(item.get("reason") or "unknown")
+        reasons[reason] = reasons.get(reason, 0) + 1
+    return ", ".join(f"{REASON_RU.get(k, k)} — {v}" for k, v in reasons.items())
 
 
 def _wait_for_order(order_id: str, cancel_check=None, skip_check=None,
@@ -303,6 +417,7 @@ def _wait_for_order(order_id: str, cancel_check=None, skip_check=None,
     last = ""
     consecutive_failures = 0
     retry_rounds = 0
+    idle_polls = 0
     while True:
         if cancel_check and cancel_check():
             _cancel_order(order_id)
@@ -347,11 +462,27 @@ def _wait_for_order(order_id: str, cancel_check=None, skip_check=None,
             )
 
         if status == "partially_completed":
-            counts = _item_counts(order)
-            active = counts.get("pending", 0) + counts.get("processing", 0)
-            failed = counts.get("failed", 0)
-            flagged = counts.get("policy_flagged", 0)
-            if active == 0:
+            progress = _order_progress(order)
+            # Пока хоть что-то выполняется (в том числе уже запущенный повтор) —
+            # просто ждём, ничего не предпринимая.
+            if progress["active"] == 0:
+                failed = progress["stuck_failed"]
+                flagged = progress["flagged"]
+                if not failed and not flagged:
+                    # Делать нечего, но заказ ещё не переключился в completed:
+                    # после успешного повтора идёт склейка, и статус заказа
+                    # какое-то время отстаёт от статусов чанков. Ждём, а не
+                    # объявляем провал — но не бесконечно.
+                    idle_polls += 1
+                    if idle_polls >= MAX_IDLE_POLLS:
+                        print()
+                        raise Exception(
+                            f"{SERVICE_NAME}: заказ завис в статусе «частично готов» "
+                            f"без незавершённых чанков (заказ {order_id})"
+                        )
+                    time.sleep(POLL_INTERVAL_SEC)
+                    continue
+                idle_polls = 0
                 if failed and retry_rounds < MAX_RETRY_ROUNDS:
                     print()
                     print(f"[{SERVICE_NAME}] Перезапускаю упавшие чанки: {failed}")
@@ -360,11 +491,18 @@ def _wait_for_order(order_id: str, cancel_check=None, skip_check=None,
                             status_callback(f"Перезапуск упавших чанков ({failed})…")
                         except Exception:
                             pass
-                    _retry_failed(order_id)
-                    retry_rounds += 1
-                    last = ""
-                    time.sleep(POLL_INTERVAL_SEC)
-                    continue
+                    plan = _retry_failed(order_id)
+                    if int(plan.get("queued_count") or 0) > 0:
+                        retry_rounds += 1
+                        last = ""
+                        time.sleep(POLL_INTERVAL_SEC)
+                        continue
+                    # Ничего не встало на повтор — повторять ещё раз бессмысленно.
+                    print()
+                    raise Exception(
+                        f"{SERVICE_NAME}: упавшие чанки перезапустить нельзя "
+                        f"({_skipped_summary(plan) or 'причина не указана'}). Заказ {order_id}"
+                    )
                 print()
                 # policy_flagged лечится только исправленным текстом чанка —
                 # автоматически повторять его бессмысленно (отклонят снова).

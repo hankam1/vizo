@@ -754,6 +754,20 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def list_voice_templates(self, engine: str):
+        """Шаблоны движка озвучки — их ID нужен для голоса, а сервисы (test в
+        Telegram-боте, Lumean в веб-кабинете) наружу его не показывают."""
+        try:
+            if engine == "voicegen":
+                from modules import voice_api_voicegen as mod
+            elif engine == "lumean":
+                from modules import voice_api_lumean as mod
+            else:
+                return {"ok": False, "error": f"У движка «{engine}» нет шаблонов"}
+            return {"ok": True, "templates": mod.list_templates()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def voice_usage(self, voice_id: str):
         """Count where this voice is referenced (languages + scenarios)."""
         try:
