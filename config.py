@@ -80,6 +80,15 @@ VOICE_API_BASE = "https://voicer.mat3u.com/api/v1"
 # задаётся UUID готового шаблона (template_uuid), а не настройками с нуля.
 VOICE_CSV666_BASE = "https://voiceapi.csv666.ru"
 
+# voicegen — третья озвучка, в UI называется «test» (рабочее имя). Голос
+# собирается из настроек, шкала параметров целочисленная (speed 70–120).
+# Пути эндпоинтов начинаются с /api/v1/client/, поэтому база — голый хост.
+VOICE_VOICEGEN_BASE = "https://qw1voicegencore.pro"
+
+# Lumean — четвёртая озвучка. Голос задаётся ТОЛЬКО шаблоном (поля voice_id
+# у заказа нет); точечные правки — через config_override на конкретный заказ.
+VOICE_LUMEAN_BASE = "https://api.lumean.app/api/public"
+
 # VeoNonStop — генерация картинок и видео (https://veononstop.org/api-docs.html)
 VEO_BASE = "https://veononstop.org/api/v1"
 

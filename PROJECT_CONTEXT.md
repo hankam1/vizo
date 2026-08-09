@@ -66,12 +66,60 @@ automation/
 - Базовая длина фиксируется ПОСЛЕ отправки сообщения — нет ложных срабатываний
 - Извлечение текста: кнопка `[data-testid="action-bar-copy"]` → буфер обмена (самый надёжный способ, т.к. `assistant-message` элементы виртуализируются при длинных чатах)
 
-### Voice API (voicer.mat3u.com)
-- Base URL: `https://voicer.mat3u.com/api/v1`
-- Auth: `Authorization: Bearer <token>` header
-- POST `/voice/synthesize` → poll `GET /voice/status/{task_id}` → `GET /voice/download/{task_id}`
-- Финальный статус: `completed`/`done`/`success`; ошибка: `failed`/`error`; цензура: `censored`
-- Пресеты в `modules/voice_templates.py`: `tartaria` (RU, eleven_v3, speed 1.1), `pl` (eleven_v3, speed 1.1), `hu` (eleven_turbo_v2_5), `cs` (eleven_turbo_v2_5)
+### Озвучка — 4 движка за одним диспетчером
+`modules/voice_api.py::synthesize(text, voice, path)` смотрит на поле `engine`
+голоса и уходит в нужный модуль. Все движки принимают `cancel_check` /
+`skip_check` / `status_callback` и бросают `VoiceCancelled` / `VoiceSkipped`.
+Голоса лежат в `user_voices.json`, поля разных движков не пересекаются
+(префиксы `vg_` и `lum_`), поэтому переключение движка ничего не затирает.
+
+| engine | UI-имя | Base | Auth | ключ в настройках |
+|---|---|---|---|---|
+| `voicer` | Озвучка Матея | `voicer.mat3u.com/api/v1` | Bearer | `voice_api_key` |
+| `csv666` | VoiceBot | `voiceapi.csv666.ru` | X-API-Key | `voice_api_key_csv666` |
+| `voicegen` | test | `qw1voicegencore.pro` | Bearer | `voice_api_key_voicegen` |
+| `lumean` | Lumean | `api.lumean.app/api/public` | X-API-KEY | `voice_api_key_lumean` |
+
+**voicer (`voice_api.py`)** — голос из полного набора настроек.
+POST `/voice/synthesize` → poll `GET /voice/status/{id}` → `GET /voice/download/{id}`.
+Финальный статус: `completed`/`done`/`success`; ошибка `failed`/`error`; цензура `censored`.
+Пресеты в `modules/voice_templates.py`: `tartaria` (RU, eleven_v3, speed 1.1), `pl`, `hu`, `cs`.
+
+**csv666 (`voice_api_csv666.py`)** — голос = UUID шаблона из Telegram-бота сервиса.
+POST `/tasks` → `GET /tasks/{id}/status` (до `ending`) → `GET /tasks/{id}/result`.
+
+**voicegen / «test» (`voice_api_voicegen.py`)** — рабочее имя, заменим когда сервис
+получит финальное. Внутренний код движка `voicegen` менять нельзя (записан в
+голосах пользователя). Голос из настроек, но шкала целочисленная: `speed` 70–120
+(100 = 1.0×), `stability`/`similarity`/`style` 0–100.
+POST `/api/v1/client/tasks` → `GET /api/v1/client/tasks/{id}` (до `done`) →
+`GET .../download` (может ответить 307 на S3).
+- модели: `elevenLabsV3`, `elevenLabs`, `fish`, `auto`, `panda`, `starfish` — от модели
+  зависит, какие параметры вообще работают (`ENGINE_PARAMS`); лишние не отправляются
+- `settings_preset` (`standard`/`stable`/`expressive`/`fast`) ЗАМЕНЯЕТ ручные настройки
+- `accent` только у `elevenLabsV3` — на другой модели сервис отвечает 400
+- `include_timestamps` (тарифы Celestial+) — JSON кладётся рядом с mp3 как `.timestamps.json`
+- альтернатива настройкам — `template_id` шаблона из Telegram-бота сервиса
+
+**Lumean (`voice_api_lumean.py`)** — голос задаётся ТОЛЬКО шаблоном, поля `voice_id`
+у заказа нет. Минимум — UUID шаблона из веб-кабинета; голос/модель/язык/настройки
+точечно правятся через `config_override` на конкретный заказ (шаблон не меняется).
+POST `/orders` → `GET /orders/{id}` (до `completed`) → `POST /storage/url` (путь из
+`result.files[]` → временная ссылка) → GET по ссылке.
+- **в `config_override` попадают только заполненные поля**: мерж идёт
+  `array_replace_recursive`, явный `null` СТИРАЕТ значение шаблона
+- тонкие настройки (`similarity_boost`/`style`/`use_speaker_boost`) работают только
+  вместе с `advanced_voice_settings: true` — иначе молча не влияют на звук
+- `generation_mode` лежит в КОРНЕ конфига, не внутри `tts_settings`
+- `partially_completed` лечится автоматически: `POST /orders/{id}/items/retry-failed`
+  (бесплатно, до 2 раундов). `policy_flagged` так не чинится — нужен исправленный
+  текст, поэтому падаем с внятной ошибкой
+- **402 `payg_topup_required`** — квоты подписки не хватило. Молча не платим: доплата
+  идёт только при включённом `lum_allow_payg` в голосе (409 `quote_mismatch` → берём
+  свежую котировку). Выключено — понятная ошибка, деньги не списаны
+- субтитры лежат отдельно, в `result.service_files[]` — качаются по флагу
+  `lum_download_subtitles` рядом с mp3
+- при отмене запуска шлём `POST /orders/{id}/cancel` — разблокирует средства
 
 ### VeoNonStop API (картинки + видео)
 - Base URL: `https://veononstop.org/api/v1`
@@ -103,13 +151,22 @@ automation/
 
 ## API ключи
 
-Ключи хранятся в `user_settings.json` (правятся через UI):
-- `voice_api_key` — Bearer-токен для voicer.mat3u.com
+Ключи хранятся в `user_settings.json` (правятся через UI). Перед запуском UI
+проверяет ключ ТОЛЬКО тех движков, что реально используются в сценарии
+(`missingVoiceKey` + карта `VOICE_ENGINE_KEYS` в `ui/index.html`):
+- `voice_api_key` — Bearer-токен для voicer.mat3u.com (Озвучка Матея)
+- `voice_api_key_csv666` — X-API-Key для voiceapi.csv666.ru (VoiceBot)
+- `voice_api_key_voicegen` — Bearer-токен для qw1voicegencore.pro (test)
+- `voice_api_key_lumean` — X-API-KEY для api.lumean.app (Lumean; нужны права
+  `orders.read`, `orders.write`, `orders.download`, `templates.read`)
 - `veo_api_key` — `veo_...` ключ для VeoNonStop
 
 ```python
-VOICE_API_BASE = "https://voicer.mat3u.com/api/v1"
-VEO_BASE = "https://veononstop.org/api/v1"
+VOICE_API_BASE     = "https://voicer.mat3u.com/api/v1"
+VOICE_CSV666_BASE  = "https://voiceapi.csv666.ru"
+VOICE_VOICEGEN_BASE = "https://qw1voicegencore.pro"
+VOICE_LUMEAN_BASE  = "https://api.lumean.app/api/public"
+VEO_BASE           = "https://veononstop.org/api/v1"
 ```
 
 ---

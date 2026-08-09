@@ -10,6 +10,10 @@ DEFAULTS = {
     "veo_api_key": "",
     "voice_api_key": "",
     "voice_api_key_csv666": "",
+    # Bearer-токен озвучки «test» (VoiceGen, qw1voicegencore.pro).
+    "voice_api_key_voicegen": "",
+    # X-API-KEY Lumean (api.lumean.app).
+    "voice_api_key_lumean": "",
     "output_dir": DEFAULT_OUTPUT_DIR,
     # Sound + popup when the queue finishes or a run fails (for overnight batches).
     "notify_on_complete": True,

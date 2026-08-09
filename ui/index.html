@@ -1797,6 +1797,16 @@ audio { width: 100%; }
                 <input class="vinput" type="password" id="set-voice-key-csv666" placeholder="ключ VoiceBot (voiceapi.csv666.ru)">
                 <div class="vfield-hint">X-API-Key VoiceBot из личного кабинета voiceapi.csv666.ru (озвучка по UUID шаблона)</div>
               </div>
+              <div>
+                <label class="vfield-label">Voice API Key — test</label>
+                <input class="vinput" type="password" id="set-voice-key-voicegen" placeholder="ключ test (qw1voicegencore.pro)">
+                <div class="vfield-hint">Bearer-токен озвучки test (qw1voicegencore.pro) — полные настройки, пресеты живости, шаблоны из Telegram-бота</div>
+              </div>
+              <div>
+                <label class="vfield-label">Voice API Key — Lumean</label>
+                <input class="vinput" type="password" id="set-voice-key-lumean" placeholder="ключ Lumean (api.lumean.app)">
+                <div class="vfield-hint">X-API-KEY Lumean из личного кабинета. Нужны права orders.read, orders.write, orders.download, templates.read</div>
+              </div>
             </div>
           </section>
           <div style="display:flex;justify-content:flex-end;gap:12px;">
@@ -1856,7 +1866,7 @@ audio { width: 100%; }
           <div class="vph">
             <div>
               <div class="vph-title">Голоса</div>
-              <div class="vph-sub">Две озвучки: Озвучка Матея (полные настройки) и VoiceBot (по UUID шаблона). Можно тестировать прослушиванием.</div>
+              <div class="vph-sub">Четыре озвучки: Озвучка Матея и test (полные настройки), VoiceBot и Lumean (по готовому шаблону). Можно тестировать прослушиванием.</div>
             </div>
             <button class="vbtn" onclick="newVoice()">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
@@ -2265,8 +2275,10 @@ audio { width: 100%; }
           <select class="vselect" id="voice-edit-engine" onchange="applyEngineUI(this.value)">
             <option value="voicer">Озвучка Матея — полные настройки</option>
             <option value="csv666">VoiceBot — по UUID шаблона</option>
+            <option value="voicegen">test — полные настройки + пресеты</option>
+            <option value="lumean">Lumean — по шаблону + оверрайды</option>
           </select>
-          <div class="vfield-hint">Выбери, через какой сервис озвучивать. VoiceBot берёт готовый шаблон по UUID.</div>
+          <div class="vfield-hint">Выбери, через какой сервис озвучивать. VoiceBot и Lumean берут готовый шаблон, Озвучка Матея и test собирают голос из настроек.</div>
         </div>
         <div id="voice-csv666-fields" style="display:none;">
           <div class="vfield">
@@ -2274,6 +2286,81 @@ audio { width: 100%; }
             <input class="vinput" id="voice-edit-uuid" placeholder="123e4567-e89b-12d3-a456-426614174000">
             <div class="vfield-hint">UUID готового шаблона VoiceBot (voiceapi.csv666.ru, создаётся в Telegram-боте сервиса). Все параметры голоса заданы в шаблоне.</div>
           </div>
+        </div>
+
+        <!-- ===== test (VoiceGen, qw1voicegencore.pro) ===== -->
+        <div id="voice-voicegen-fields" style="display:none;">
+          <div class="vfield">
+            <label class="vfield-label">Voice ID</label>
+            <input class="vinput" id="voice-edit-vg-voiceid" placeholder="ID из каталога голосов">
+            <div class="vfield-hint">ID голоса из каталога test (включая личные клоны). Сюда же можно вставить ElevenLabs ID — сервис импортирует голос сам.</div>
+          </div>
+          <div class="vfield">
+            <label class="vfield-label">Модель</label>
+            <select class="vselect" id="voice-edit-vg-engine" onchange="applyVgEngineUI()">
+              <option value="elevenLabsV3">elevenLabsV3</option>
+              <option value="elevenLabs">elevenLabs</option>
+              <option value="fish">fish</option>
+              <option value="auto">auto</option>
+              <option value="panda">panda</option>
+              <option value="starfish">starfish</option>
+            </select>
+            <div class="vfield-hint">От модели зависит, какие параметры вообще работают. Акцент есть только у elevenLabsV3.</div>
+          </div>
+          <div class="vfield">
+            <label class="vfield-label">ID шаблона (необязательно)</label>
+            <input class="vinput" id="voice-edit-vg-template" placeholder="пусто — использовать настройки ниже">
+            <div class="vfield-hint">Шаблон из Telegram-бота сервиса: подставит голос, модель и настройки. Текст и имя файла всё равно берутся отсюда.</div>
+          </div>
+        </div>
+
+        <!-- ===== Lumean (api.lumean.app) ===== -->
+        <div id="voice-lumean-fields" style="display:none;">
+          <div class="vfield">
+            <label class="vfield-label">ID шаблона</label>
+            <input class="vinput" id="voice-edit-lum-template" placeholder="123e4567-e89b-12d3-a456-426614174000">
+            <div class="vfield-hint">UUID шаблона Lumean (создаётся в веб-кабинете). У Lumean голос задаётся только шаблоном — без него заказ не создать.</div>
+          </div>
+          <div class="vfield">
+            <label class="vfield-label">Voice ID — оверрайд (необязательно)</label>
+            <input class="vinput" id="voice-edit-lum-voiceid" placeholder="пусто — голос из шаблона">
+            <div class="vfield-hint">Переопределяет голос только для заказов этого пресета, шаблон не меняется.</div>
+          </div>
+          <div class="vfield">
+            <label class="vfield-label">Модель — оверрайд</label>
+            <select class="vselect" id="voice-edit-lum-model">
+              <option value="">— из шаблона —</option>
+              <option value="eleven_v3">eleven_v3</option>
+              <option value="eleven_v3_beta">eleven_v3_beta</option>
+              <option value="eleven_multilingual_v2">eleven_multilingual_v2</option>
+              <option value="eleven_flash_v2_5">eleven_flash_v2_5</option>
+              <option value="eleven_turbo_v2_5">eleven_turbo_v2_5</option>
+              <option value="eleven_turbo_v2">eleven_turbo_v2</option>
+              <option value="eleven_flash_v2">eleven_flash_v2</option>
+            </select>
+          </div>
+          <div class="vfield">
+            <label class="vfield-label">Язык синтеза (ISO-639-1)</label>
+            <input class="vinput" id="voice-edit-lum-lang" placeholder="ru, en, pl… — пусто — из шаблона">
+            <div class="vfield-hint">Явный код надёжнее автоопределения. Редкие языки (he, kk, vi, cy…) работают только на моделях v3.</div>
+          </div>
+          <div class="vfield">
+            <label class="vfield-label">Режим нарезки</label>
+            <select class="vselect" id="voice-edit-lum-mode">
+              <option value="default">default — сплошной рез по размеру</option>
+              <option value="paragraph">paragraph — абзац как отдельная единица</option>
+            </select>
+            <div class="vfield-hint">Абзацный режим влияет на цену: минимальный тарифицируемый объём считается на КАЖДЫЙ абзац.</div>
+          </div>
+          <div class="vfield" style="display:flex;align-items:center;gap:12px;">
+            <label class="vfield-label" style="margin:0;">Скачивать субтитры (.srt/.vtt)</label>
+            <div class="vswitch" id="voice-edit-lum-subs" onclick="toggleSw(this)" style="margin-left:auto;"></div>
+          </div>
+          <div class="vfield" style="display:flex;align-items:center;gap:12px;">
+            <label class="vfield-label" style="margin:0;">Разрешить доплату PAYG</label>
+            <div class="vswitch" id="voice-edit-lum-payg" onclick="toggleSw(this)" style="margin-left:auto;"></div>
+          </div>
+          <div class="vfield-hint" style="margin-top:-8px;">Если квоты подписки не хватит, Lumean предложит доплатить из LMC-баланса. Выключено — заказ просто упадёт с понятной ошибкой и деньги не спишутся.</div>
         </div>
         <div id="voice-voicer-basic">
           <div class="vfield">
@@ -2289,6 +2376,114 @@ audio { width: 100%; }
               <option value="eleven_multilingual_v2">eleven_multilingual_v2</option>
             </select>
             <div class="vfield-hint">eleven_v3 — для русского/польского. turbo_v2_5 — для остальных языков.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== Параметры test (шкала сервиса: speed 70–120, остальное 0–100) ===== -->
+      <div class="vfsec" id="voice-sec-vg-params" style="display:none;">
+        <div class="vfsec-head">
+          <div class="vfsec-num">2</div>
+          <div class="vfsec-title">Параметры голоса</div>
+        </div>
+        <div class="vfield">
+          <label class="vfield-label">Пресет живости</label>
+          <select class="vselect" id="voice-edit-vg-preset" onchange="applyVgEngineUI()">
+            <option value="">— ручные настройки —</option>
+            <option value="standard">standard — стандарт</option>
+            <option value="stable">stable — стабильнее</option>
+            <option value="expressive">expressive — живее</option>
+            <option value="fast">fast — быстрее</option>
+          </select>
+          <div class="vfield-hint">Пресет ЗАМЕНЯЕТ ручные настройки ниже. Пусто — шлём ползунки.</div>
+        </div>
+        <div id="voice-vg-manual">
+          <div class="vfield" data-vg-param="speed">
+            <label class="vfield-label">Speed · Скорость</label>
+            <div class="vslider-row"><div class="vslider"><input type="range" id="voice-edit-vg-speed" min="70" max="120" step="1" oninput="updateSlider(this)"></div><div class="vsl-value" id="voice-edit-vg-speed-val">1.00×</div></div>
+            <div class="vfield-hint">Шкала сервиса: 100 = 1.0×. У fish/auto/panda/starfish диапазон шире (50–150), шаг 5.</div>
+          </div>
+          <div class="vfield" data-vg-param="stability">
+            <label class="vfield-label">Stability · Стабильность</label>
+            <div class="vslider-row"><div class="vslider"><input type="range" id="voice-edit-vg-stability" min="0" max="100" step="1" oninput="updateSlider(this)"></div><div class="vsl-value" id="voice-edit-vg-stability-val">0</div></div>
+            <div class="vfield-hint">У elevenLabsV3 работают только три положения: 0, 50 и 100.</div>
+          </div>
+          <div class="vfield" data-vg-param="similarity">
+            <label class="vfield-label">Similarity · Похожесть</label>
+            <div class="vslider-row"><div class="vslider"><input type="range" id="voice-edit-vg-similarity" min="0" max="100" step="1" oninput="updateSlider(this)"></div><div class="vsl-value" id="voice-edit-vg-similarity-val">50</div></div>
+          </div>
+          <div class="vfield" data-vg-param="style">
+            <label class="vfield-label">Style · Стиль</label>
+            <div class="vslider-row"><div class="vslider"><input type="range" id="voice-edit-vg-style" min="0" max="100" step="1" oninput="updateSlider(this)"></div><div class="vsl-value" id="voice-edit-vg-style-val">50</div></div>
+          </div>
+          <div class="vfield" data-vg-param="use_speaker_boost" style="display:flex;align-items:center;gap:12px;">
+            <label class="vfield-label" style="margin:0;">Use Speaker Boost · Усиление</label>
+            <div class="vswitch" id="voice-edit-vg-speakerboost" onclick="toggleSw(this)" style="margin-left:auto;"></div>
+          </div>
+        </div>
+        <div class="vfield" id="voice-vg-accent-field">
+          <label class="vfield-label">Акцент</label>
+          <input class="vinput" id="voice-edit-vg-accent" placeholder="auto, ru, en, de… или off">
+          <div class="vfield-hint">Только для elevenLabsV3. auto — определить по тексту, off — не управлять акцентом. Для других моделей поле не отправляется.</div>
+        </div>
+      </div>
+
+      <div class="vfsec" id="voice-sec-vg-split" style="display:none;">
+        <div class="vfsec-head">
+          <div class="vfsec-num">3</div>
+          <div class="vfsec-title">Разбиение и потоки</div>
+        </div>
+        <div class="vfield">
+          <label class="vfield-label">Chunk Size</label>
+          <input class="vinput" type="number" id="voice-edit-vg-chunk" min="100" max="5000" step="100" placeholder="пусто — на усмотрение сервиса">
+          <div class="vfield-hint">Сервер может урезать значение своим максимумом. Для иероглифических языков он сам берёт чанк меньше.</div>
+        </div>
+        <div class="vfield">
+          <label class="vfield-label">Пауза между чанками, сек</label>
+          <input class="vinput" type="number" id="voice-edit-vg-delay" min="0" max="10" step="0.1" placeholder="пусто — без паузы">
+        </div>
+        <div class="vfield">
+          <label class="vfield-label">Потоков</label>
+          <input class="vinput" type="number" id="voice-edit-vg-threads" min="1" max="50" step="1" placeholder="5">
+          <div class="vfield-hint">Сколько потоков запросить у сервиса на эту задачу.</div>
+        </div>
+        <div class="vfield" style="display:flex;align-items:center;gap:12px;">
+          <label class="vfield-label" style="margin:0;">Таймстампы слов (JSON)</label>
+          <div class="vswitch" id="voice-edit-vg-timestamps" onclick="toggleSw(this)" style="margin-left:auto;"></div>
+        </div>
+        <div class="vfield-hint" style="margin-top:-8px;">Доступно на тарифах Celestial и Eternal. Ложится рядом с mp3 файлом <code>.timestamps.json</code>; на других тарифах сервис молча игнорирует флаг.</div>
+      </div>
+
+      <!-- ===== Оверрайд настроек голоса Lumean (шкала 0..1, как у ElevenLabs) ===== -->
+      <div class="vfsec" id="voice-sec-lum-params" style="display:none;">
+        <div class="vfsec-head">
+          <div class="vfsec-num">2</div>
+          <div class="vfsec-title">Параметры голоса</div>
+          <div class="vswitch" id="voice-edit-lum-override" onclick="toggleLumOverride(this)" style="margin-left:auto;"></div>
+        </div>
+        <div class="vfield-hint">Выключено — настройки берутся из шаблона Lumean. Включено — ползунки ниже уходят в оверрайд заказа (шаблон не меняется).</div>
+        <div id="voice-lum-settings" style="opacity:0.45;">
+          <div class="vfield">
+            <label class="vfield-label">Stability · Стабильность</label>
+            <div class="vslider-row"><div class="vslider"><input type="range" id="voice-edit-lum-stability" min="0" max="1" step="0.01" oninput="updateSlider(this)"></div><div class="vsl-value" id="voice-edit-lum-stability-val">0.50</div></div>
+            <div class="vfield-hint">У моделей v3 допустимы только 0.0, 0.5 и 1.0.</div>
+          </div>
+          <div class="vfield">
+            <label class="vfield-label">Similarity Boost · Похожесть</label>
+            <div class="vslider-row"><div class="vslider"><input type="range" id="voice-edit-lum-similarity" min="0" max="1" step="0.01" oninput="updateSlider(this)"></div><div class="vsl-value" id="voice-edit-lum-similarity-val">0.75</div></div>
+          </div>
+          <div class="vfield">
+            <label class="vfield-label">Style · Стиль</label>
+            <div class="vslider-row"><div class="vslider"><input type="range" id="voice-edit-lum-style" min="0" max="1" step="0.01" oninput="updateSlider(this)"></div><div class="vsl-value" id="voice-edit-lum-style-val">0.00</div></div>
+          </div>
+          <div class="vfield" style="display:flex;align-items:center;gap:12px;">
+            <label class="vfield-label" style="margin:0;">Use Speaker Boost · Усиление</label>
+            <div class="vswitch on" id="voice-edit-lum-speakerboost" onclick="toggleSw(this)" style="margin-left:auto;"></div>
+          </div>
+          <div class="vfield">
+            <label class="vfield-label">Speed · Скорость</label>
+            <div class="vslider-row"><div class="vslider"><input type="range" id="voice-edit-lum-speed" min="0.7" max="1.2" step="0.01" oninput="updateSlider(this)"></div><div class="vsl-value" id="voice-edit-lum-speed-val">1.00×</div></div>
+            <div class="vfield-hint">Диапазон Lumean: 0.7–1.2.</div>
           </div>
         </div>
       </div>
@@ -2446,7 +2641,7 @@ audio { width: 100%; }
         </div>
         <div style="color:var(--ink-2);font-size:14px;line-height:1.6;">
           <ol style="margin:0 0 0 20px;display:flex;flex-direction:column;gap:6px;">
-            <li>Сначала добавь голос для этого языка: <strong style="color:var(--ink);">Настройки → Голоса → «+ Создать голос»</strong>. Выбери движок: <strong style="color:var(--ink);">Озвучка Матея</strong> (укажи voice_id и модель) или <strong style="color:var(--ink);">VoiceBot</strong> (укажи только UUID готового шаблона).</li>
+            <li>Сначала добавь голос для этого языка: <strong style="color:var(--ink);">Настройки → Голоса → «+ Создать голос»</strong>. Выбери движок: <strong style="color:var(--ink);">Озвучка Матея</strong> или <strong style="color:var(--ink);">test</strong> (укажи voice_id и модель), <strong style="color:var(--ink);">VoiceBot</strong> или <strong style="color:var(--ink);">Lumean</strong> (укажи ID готового шаблона).</li>
             <li>Потом: <strong style="color:var(--ink);">Настройки → Языки перевода → «+ Добавить язык»</strong></li>
             <li>Введи название («Испанский»), выбери флаг из сетки, привяжи голос, по желанию напиши свой промпт-шаблон</li>
             <li>Сохрани — язык появится на экране «Перевод»</li>
@@ -2473,7 +2668,7 @@ audio { width: 100%; }
         </div>
         <div style="color:var(--ink-2);font-size:14px;line-height:1.6;">
           <p><strong style="color:var(--ink);">VeoNonStop API Key</strong> — нужен для генерации картинок (Banana 2/Pro) и видео в сценариях.</p>
-          <p style="margin-top:8px;"><strong style="color:var(--ink);">Voice API Key</strong> — нужен для озвучки и теста голосов. Две озвучки, два ключа: <strong style="color:var(--ink);">Озвучка Матея</strong> (Bearer-токен от voicer.mat3u.com) и <strong style="color:var(--ink);">VoiceBot</strong> (X-API-Key от voiceapi.csv666.ru).</p>
+          <p style="margin-top:8px;"><strong style="color:var(--ink);">Voice API Key</strong> — нужен для озвучки и теста голосов. Четыре озвучки, четыре отдельных ключа: <strong style="color:var(--ink);">Озвучка Матея</strong> (Bearer от voicer.mat3u.com), <strong style="color:var(--ink);">VoiceBot</strong> (X-API-Key от voiceapi.csv666.ru), <strong style="color:var(--ink);">test</strong> (Bearer от qw1voicegencore.pro) и <strong style="color:var(--ink);">Lumean</strong> (X-API-KEY от api.lumean.app). Хватит ключа того движка, который реально используется в сценарии.</p>
           <p style="margin-top:8px;"><strong style="color:var(--ink);">Claude</strong> — работает через автоматизацию браузера, нужно один раз «Привязать Claude аккаунт» в настройках (откроется Chrome, авторизуйся в claude.ai и закрой окно).</p>
           <p style="margin-top:8px;"><strong style="color:var(--ink);">ChatGPT</strong> — тоже через автоматизацию браузера, у него своё окно Chrome. Вход не обязателен: без аккаунта шаги работают анонимно (без выбора модели, без вложений, лимиты жёстче). «Привязать ChatGPT аккаунт» — в настройках.</p>
         </div>
@@ -2541,7 +2736,7 @@ audio { width: 100%; }
           <!-- VOICE -->
           <h4 style="font-family:'JetBrains Mono';font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:var(--muted-2);margin:18px 0 10px;">🎙 Озвучка</h4>
           <div style="display:flex;flex-direction:column;gap:10px;">
-            <div><strong style="color:var(--ink);">Синтез голоса</strong> — генерит mp3 из переменной через выбранный в голосе движок (Озвучка Матея или VoiceBot). Поля: «Голос» — выпадающий список из настроек, «Источник» — имя переменной с текстом, «Имя файла» — куда сохранить. Нужен соответствующий Voice API ключ в настройках. Во время работы пишется статус задачи (для VoiceBot — прямо из API).</div>
+            <div><strong style="color:var(--ink);">Синтез голоса</strong> — генерит mp3 из переменной через выбранный в голосе движок (Озвучка Матея, VoiceBot, test или Lumean). Поля: «Голос» — выпадающий список из настроек, «Источник» — имя переменной с текстом, «Имя файла» — куда сохранить. Нужен соответствующий Voice API ключ в настройках. Во время работы пишется статус задачи прямо из API сервиса.</div>
           </div>
 
           <!-- IMAGES -->
@@ -2843,6 +3038,8 @@ async function loadSettings() {
   const veo = document.getElementById('set-veo-key'); if (veo) veo.value = s.veo_api_key || '';
   const voice = document.getElementById('set-voice-key'); if (voice) voice.value = s.voice_api_key || '';
   const voiceCsv = document.getElementById('set-voice-key-csv666'); if (voiceCsv) voiceCsv.value = s.voice_api_key_csv666 || '';
+  const voiceVg = document.getElementById('set-voice-key-voicegen'); if (voiceVg) voiceVg.value = s.voice_api_key_voicegen || '';
+  const voiceLum = document.getElementById('set-voice-key-lumean'); if (voiceLum) voiceLum.value = s.voice_api_key_lumean || '';
   const out = document.getElementById('set-output-dir'); if (out) out.value = s.output_dir || '';
   const notif = document.getElementById('set-notify'); if (notif) notif.checked = (s.notify_on_complete !== false);
   const retry = document.getElementById('set-auto-retry'); if (retry) retry.value = (s.auto_retry != null ? s.auto_retry : 1);
@@ -2864,6 +3061,8 @@ async function saveSettings() {
     veo_api_key: document.getElementById('set-veo-key').value,
     voice_api_key: document.getElementById('set-voice-key').value,
     voice_api_key_csv666: document.getElementById('set-voice-key-csv666').value,
+    voice_api_key_voicegen: document.getElementById('set-voice-key-voicegen').value,
+    voice_api_key_lumean: document.getElementById('set-voice-key-lumean').value,
     output_dir: document.getElementById('set-output-dir').value,
     notify_on_complete: !!(document.getElementById('set-notify') && document.getElementById('set-notify').checked),
     auto_retry: retryN,
@@ -3031,11 +3230,8 @@ async function startTranslate() {
     const lang = langs.find(l => l.name === selectedLang || l.id === selectedLang);
     if (lang) eng = voiceEngineFor(lang.voice_id);
   } catch (e) {}
-  if (eng === 'csv666') {
-    if (!s.voice_api_key_csv666) return toast('Укажи Voice API ключ VoiceBot', 'error');
-  } else if (!s.voice_api_key) {
-    return toast('Укажи Voice API ключ', 'error');
-  }
+  const keyErr = missingVoiceKey([eng], s);
+  if (keyErr) return toast(keyErr, 'error');
   if (s.ask_folder_name !== false) {
     showModal(`<div class="vmodal" style="width:480px;">
       <h3>Запуск «Перевод — ${escapeHtml(selectedLang)}»</h3>
@@ -3965,17 +4161,14 @@ async function runScenarioById(id) {
   const s = scenariosCache.find(x => x.id === id);
   if (!s) return toast('Сценарий не найден', 'error');
   const skeys = await api().load_settings();
-  // Check API keys for any voice/veo step. Озвучка может идти через два движка
-  // (voicer / csv666) — проверяем ключ того движка, что реально используется.
+  // Check API keys for any voice/veo step. Озвучка может идти через разные
+  // движки — проверяем ключ каждого, что реально используется в сценарии.
   if (!voicesCache.length) voicesCache = await api().list_voices() || [];
   const voiceSteps = (s.steps || []).filter(st => st.type === 'voice');
-  let needVoicer = false, needCsv = false;
-  for (const st of voiceSteps) {
-    if (voiceEngineFor(st.preset) === 'csv666') needCsv = true; else needVoicer = true;
-  }
+  const engines = [...new Set(voiceSteps.map(st => voiceEngineFor(st.preset)))];
   const hasVeo = (s.steps || []).some(st => /^(banana_|video_)/.test(st.type));
-  if (needVoicer && !skeys.voice_api_key) return toast('Укажи Voice API ключ (Озвучка Матея)', 'error');
-  if (needCsv && !skeys.voice_api_key_csv666) return toast('Укажи Voice API ключ VoiceBot', 'error');
+  const keyErr = missingVoiceKey(engines, skeys);
+  if (keyErr) return toast(keyErr, 'error');
   if (hasVeo && !skeys.veo_api_key) return toast('Укажи VeoNonStop API ключ', 'error');
   await runScenarioWithInputs(s, id);
 }
@@ -4952,8 +5145,51 @@ function voiceEngineFor(voiceId) {
 }
 
 // Человекочитаемое имя движка озвучки для подписей в UI.
+const VOICE_ENGINE_NAMES = {
+  voicer: 'Озвучка Матея',
+  csv666: 'VoiceBot',
+  voicegen: 'test',
+  lumean: 'Lumean',
+};
+// Какой ключ из настроек нужен каждому движку — чтобы перед запуском ругаться
+// на отсутствующий ключ именно того сервиса, который реально будет работать.
+const VOICE_ENGINE_KEYS = {
+  voicer: 'voice_api_key',
+  csv666: 'voice_api_key_csv666',
+  voicegen: 'voice_api_key_voicegen',
+  lumean: 'voice_api_key_lumean',
+};
 function voiceEngineName(engine) {
-  return engine === 'csv666' ? 'VoiceBot' : 'Озвучка Матея';
+  return VOICE_ENGINE_NAMES[engine] || VOICE_ENGINE_NAMES.voicer;
+}
+
+// Проверяет, что для набора движков заданы ключи. Возвращает текст ошибки
+// или null, если всё на месте.
+function missingVoiceKey(engines, s) {
+  for (const eng of engines) {
+    const key = VOICE_ENGINE_KEYS[eng] || VOICE_ENGINE_KEYS.voicer;
+    if (!s[key]) return `Укажи Voice API ключ (${voiceEngineName(eng)})`;
+  }
+  return null;
+}
+
+// Короткая подпись под именем голоса — своя для каждого движка.
+function voiceMetaFor(v) {
+  const short = (s, n) => escapeHtml(String(s || '').slice(0, n)) + (String(s || '').length > n ? '…' : '');
+  switch (v.engine) {
+    case 'csv666':
+      return `<span>uuid · ${short(v.template_uuid, 13)}</span>`;
+    case 'voicegen':
+      return `<span>модель · ${escapeHtml(v.vg_voice_engine || 'elevenLabsV3')}</span><span>•</span>`
+        + (v.vg_template_id
+          ? `<span>шаблон · ${short(v.vg_template_id, 10)}</span>`
+          : `<span>voice_id · ${short(v.vg_voice_id, 10)}</span>`);
+    case 'lumean':
+      return `<span>шаблон · ${short(v.lum_template_id, 13)}</span>`
+        + (v.lum_voice_id ? `<span>•</span><span>voice_id · ${short(v.lum_voice_id, 10)}</span>` : '');
+    default:
+      return `<span>модель · ${escapeHtml(v.model_id || '')}</span><span>•</span><span>voice_id · ${short(v.voice_id, 10)}</span>`;
+  }
 }
 
 async function renderVoices() {
@@ -4970,9 +5206,7 @@ async function renderVoices() {
           ${v.builtin ? '<span class="vbadge builtin">встроенный</span>' : ''}
         </div>
         <div class="vvoice-meta">
-          ${v.engine === 'csv666'
-            ? `<span>VoiceBot</span><span>•</span><span>uuid · ${escapeHtml((v.template_uuid || '').slice(0, 13))}…</span>`
-            : `<span>Озвучка Матея</span><span>•</span><span>модель · ${escapeHtml(v.model_id || '')}</span><span>•</span><span>voice_id · ${escapeHtml((v.voice_id || '').slice(0, 10))}…</span>`}
+          <span>${escapeHtml(voiceEngineName(v.engine || 'voicer'))}</span><span>•</span>${voiceMetaFor(v)}
         </div>
       </div>
       <span class="vusage zero" id="usage-${escapeHtml(v.id)}">…</span>
@@ -5056,6 +5290,27 @@ async function newVoice() {
     auto_pause_enabled: true,
     auto_pause_duration: 1.0,
     auto_pause_frequency: 1,
+    // test (VoiceGen) — своя шкала: speed 70–120 (100 = 1.0×), остальное 0–100.
+    vg_voice_id: '',
+    vg_voice_engine: 'elevenLabsV3',
+    vg_template_id: '',
+    vg_settings_preset: '',
+    vg_settings: { speed: 100, stability: 0, similarity: 50, style: 50, use_speaker_boost: false },
+    vg_accent: 'auto',
+    vg_chunk_size: '',
+    vg_delay_between_chunks: '',
+    vg_thread_count: 5,
+    vg_include_timestamps: false,
+    // Lumean — голос только по шаблону, остальное опциональные оверрайды.
+    lum_template_id: '',
+    lum_voice_id: '',
+    lum_model_id: '',
+    lum_language_code: '',
+    lum_generation_mode: 'default',
+    lum_override_settings: false,
+    lum_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.0, use_speaker_boost: true, speed: 1.0 },
+    lum_download_subtitles: false,
+    lum_allow_payg: false,
     builtin: false,
   };
   fillVoiceEditor();
@@ -5070,14 +5325,62 @@ async function editVoice(id) {
   show('voice-edit');
 }
 
+// Какие блоки редактора принадлежат какому движку. Показываем только блоки
+// выбранного движка — поля остальных остаются в объекте голоса нетронутыми.
+const VOICE_ENGINE_BLOCKS = {
+  voicer: ['voice-voicer-basic', 'voice-sec-params', 'voice-sec-split', 'voice-sec-pause'],
+  csv666: ['voice-csv666-fields'],
+  voicegen: ['voice-voicegen-fields', 'voice-sec-vg-params', 'voice-sec-vg-split'],
+  lumean: ['voice-lumean-fields', 'voice-sec-lum-params'],
+};
+
 function applyEngineUI(engine) {
-  const isCsv = engine === 'csv666';
-  document.getElementById('voice-csv666-fields').style.display = isCsv ? 'block' : 'none';
-  document.getElementById('voice-voicer-basic').style.display = isCsv ? 'none' : 'block';
-  for (const id of ['voice-sec-params', 'voice-sec-split', 'voice-sec-pause']) {
-    const el = document.getElementById(id);
-    if (el) el.style.display = isCsv ? 'none' : '';
+  const active = VOICE_ENGINE_BLOCKS[engine] || VOICE_ENGINE_BLOCKS.voicer;
+  for (const ids of Object.values(VOICE_ENGINE_BLOCKS)) {
+    for (const id of ids) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = active.includes(id) ? '' : 'none';
+    }
   }
+  if (engine === 'voicegen') applyVgEngineUI();
+}
+
+// Параметры test зависят от выбранной модели: у auto/panda/starfish есть только
+// speed, акцент понимает лишь elevenLabsV3. Лишние ползунки прячем, чтобы не
+// создавать иллюзию, что они на что-то влияют.
+const VG_ENGINE_PARAMS = {
+  elevenLabsV3: ['speed', 'stability'],
+  elevenLabs: ['speed', 'similarity', 'stability', 'style', 'use_speaker_boost'],
+  fish: ['speed', 'stability'],
+  auto: ['speed'],
+  panda: ['speed'],
+  starfish: ['speed'],
+};
+// У fish/auto/panda/starfish скорость шире и шагом 5 (см. таблицу в доке).
+const VG_WIDE_SPEED = ['fish', 'auto', 'panda', 'starfish'];
+
+function applyVgEngineUI() {
+  const eng = document.getElementById('voice-edit-vg-engine').value;
+  const allowed = VG_ENGINE_PARAMS[eng] || ['speed'];
+  const preset = document.getElementById('voice-edit-vg-preset').value;
+  // Пресет живости заменяет ручные настройки — прячем их целиком.
+  document.getElementById('voice-vg-manual').style.display = preset ? 'none' : '';
+  document.querySelectorAll('#voice-vg-manual [data-vg-param]').forEach(el => {
+    const on = allowed.includes(el.dataset.vgParam);
+    el.style.display = on ? (el.dataset.vgParam === 'use_speaker_boost' ? 'flex' : '') : 'none';
+  });
+  const speed = document.getElementById('voice-edit-vg-speed');
+  const wide = VG_WIDE_SPEED.includes(eng);
+  speed.min = wide ? 50 : 70;
+  speed.max = wide ? 150 : 120;
+  speed.step = wide ? 5 : 1;
+  updateSlider(speed);
+  document.getElementById('voice-vg-accent-field').style.display = eng === 'elevenLabsV3' ? '' : 'none';
+}
+
+function toggleLumOverride(el) {
+  toggleSw(el);
+  document.getElementById('voice-lum-settings').style.opacity = el.classList.contains('on') ? '1' : '0.45';
 }
 
 function fillVoiceEditor() {
@@ -5086,7 +5389,6 @@ function fillVoiceEditor() {
   const engine = v.engine || 'voicer';
   document.getElementById('voice-edit-engine').value = engine;
   document.getElementById('voice-edit-uuid').value = v.template_uuid || '';
-  applyEngineUI(engine);
   document.getElementById('voice-edit-voiceid').value = v.voice_id || '';
   document.getElementById('voice-edit-model').value = v.model_id || 'eleven_v3';
   document.getElementById('voice-edit-builtin').style.display = v.builtin ? 'inline-flex' : 'none';
@@ -5102,6 +5404,45 @@ function fillVoiceEditor() {
   setSwitch('voice-edit-pause', v.auto_pause_enabled !== false);
   document.getElementById('voice-edit-pause-dur').value = v.auto_pause_duration ?? 1.0;
   document.getElementById('voice-edit-pause-freq').value = v.auto_pause_frequency ?? 1;
+
+  // test (VoiceGen)
+  document.getElementById('voice-edit-vg-voiceid').value = v.vg_voice_id || '';
+  document.getElementById('voice-edit-vg-engine').value = v.vg_voice_engine || 'elevenLabsV3';
+  document.getElementById('voice-edit-vg-template').value = v.vg_template_id || '';
+  document.getElementById('voice-edit-vg-preset').value = v.vg_settings_preset || '';
+  // Диапазон speed зависит от модели — правим его ДО записи значения, иначе
+  // input[type=range] молча обрежет его до старого max.
+  applyVgEngineUI();
+  const gs = v.vg_settings || {};
+  setRange('voice-edit-vg-speed', gs.speed ?? 100);
+  setRange('voice-edit-vg-stability', gs.stability ?? 0);
+  setRange('voice-edit-vg-similarity', gs.similarity ?? 50);
+  setRange('voice-edit-vg-style', gs.style ?? 50);
+  setSwitch('voice-edit-vg-speakerboost', !!gs.use_speaker_boost);
+  document.getElementById('voice-edit-vg-accent').value = v.vg_accent ?? 'auto';
+  document.getElementById('voice-edit-vg-chunk').value = v.vg_chunk_size ?? '';
+  document.getElementById('voice-edit-vg-delay').value = v.vg_delay_between_chunks ?? '';
+  document.getElementById('voice-edit-vg-threads').value = v.vg_thread_count ?? 5;
+  setSwitch('voice-edit-vg-timestamps', !!v.vg_include_timestamps);
+
+  // Lumean
+  document.getElementById('voice-edit-lum-template').value = v.lum_template_id || '';
+  document.getElementById('voice-edit-lum-voiceid').value = v.lum_voice_id || '';
+  document.getElementById('voice-edit-lum-model').value = v.lum_model_id || '';
+  document.getElementById('voice-edit-lum-lang').value = v.lum_language_code || '';
+  document.getElementById('voice-edit-lum-mode').value = v.lum_generation_mode || 'default';
+  setSwitch('voice-edit-lum-subs', !!v.lum_download_subtitles);
+  setSwitch('voice-edit-lum-payg', !!v.lum_allow_payg);
+  setSwitch('voice-edit-lum-override', !!v.lum_override_settings);
+  document.getElementById('voice-lum-settings').style.opacity = v.lum_override_settings ? '1' : '0.45';
+  const ls = v.lum_settings || {};
+  setRange('voice-edit-lum-stability', ls.stability ?? 0.5);
+  setRange('voice-edit-lum-similarity', ls.similarity_boost ?? 0.75);
+  setRange('voice-edit-lum-style', ls.style ?? 0);
+  setRange('voice-edit-lum-speed', ls.speed ?? 1.0);
+  setSwitch('voice-edit-lum-speakerboost', ls.use_speaker_boost !== false);
+
+  applyEngineUI(engine);
   document.getElementById('voice-test-player').style.display = 'none';
 }
 
@@ -5112,9 +5453,15 @@ function setRange(id, val) {
 }
 function updateSlider(el) {
   const valEl = document.getElementById(el.id + '-val');
+  if (!valEl) return;
   const v = parseFloat(el.value);
-  const suffix = el.id.includes('speed') ? '×' : '';
-  valEl.textContent = v.toFixed(2) + suffix;
+  const isSpeed = el.id.includes('speed');
+  // Шаг ≥ 1 — целочисленная шкала test (speed 70–120, где 100 = 1.0×).
+  if ((parseFloat(el.step) || 0.01) >= 1) {
+    valEl.textContent = isSpeed ? (v / 100).toFixed(2) + '×' : String(Math.round(v));
+  } else {
+    valEl.textContent = v.toFixed(2) + (isSpeed ? '×' : '');
+  }
 }
 function setSwitch(id, on) {
   const el = document.getElementById(id);
@@ -5147,17 +5494,61 @@ function readVoiceFromForm() {
     auto_pause_enabled: document.getElementById('voice-edit-pause').classList.contains('on'),
     auto_pause_duration: parseFloat(document.getElementById('voice-edit-pause-dur').value),
     auto_pause_frequency: parseInt(document.getElementById('voice-edit-pause-freq').value, 10),
+
+    // test (VoiceGen). Пустые числовые поля храним как '' — модуль их не шлёт,
+    // и сервис решает сам (0 значил бы «без пауз/без потоков»).
+    vg_voice_id: document.getElementById('voice-edit-vg-voiceid').value.trim(),
+    vg_voice_engine: document.getElementById('voice-edit-vg-engine').value,
+    vg_template_id: document.getElementById('voice-edit-vg-template').value.trim(),
+    vg_settings_preset: document.getElementById('voice-edit-vg-preset').value,
+    vg_settings: {
+      speed: parseInt(document.getElementById('voice-edit-vg-speed').value, 10),
+      stability: parseInt(document.getElementById('voice-edit-vg-stability').value, 10),
+      similarity: parseInt(document.getElementById('voice-edit-vg-similarity').value, 10),
+      style: parseInt(document.getElementById('voice-edit-vg-style').value, 10),
+      use_speaker_boost: document.getElementById('voice-edit-vg-speakerboost').classList.contains('on'),
+    },
+    vg_accent: document.getElementById('voice-edit-vg-accent').value.trim(),
+    vg_chunk_size: document.getElementById('voice-edit-vg-chunk').value.trim(),
+    vg_delay_between_chunks: document.getElementById('voice-edit-vg-delay').value.trim(),
+    vg_thread_count: document.getElementById('voice-edit-vg-threads').value.trim(),
+    vg_include_timestamps: document.getElementById('voice-edit-vg-timestamps').classList.contains('on'),
+
+    // Lumean
+    lum_template_id: document.getElementById('voice-edit-lum-template').value.trim(),
+    lum_voice_id: document.getElementById('voice-edit-lum-voiceid').value.trim(),
+    lum_model_id: document.getElementById('voice-edit-lum-model').value,
+    lum_language_code: document.getElementById('voice-edit-lum-lang').value.trim(),
+    lum_generation_mode: document.getElementById('voice-edit-lum-mode').value,
+    lum_override_settings: document.getElementById('voice-edit-lum-override').classList.contains('on'),
+    lum_settings: {
+      stability: parseFloat(document.getElementById('voice-edit-lum-stability').value),
+      similarity_boost: parseFloat(document.getElementById('voice-edit-lum-similarity').value),
+      style: parseFloat(document.getElementById('voice-edit-lum-style').value),
+      use_speaker_boost: document.getElementById('voice-edit-lum-speakerboost').classList.contains('on'),
+      speed: parseFloat(document.getElementById('voice-edit-lum-speed').value),
+    },
+    lum_download_subtitles: document.getElementById('voice-edit-lum-subs').classList.contains('on'),
+    lum_allow_payg: document.getElementById('voice-edit-lum-payg').classList.contains('on'),
   };
+}
+
+// Общая проверка обязательных полей голоса — одна на сохранение и на тест.
+function voiceFormError(v) {
+  if (v.engine === 'csv666' && !v.template_uuid) return 'Введи UUID шаблона';
+  if (v.engine === 'voicegen' && !v.vg_voice_id && !v.vg_template_id) {
+    return 'Введи voice_id или ID шаблона';
+  }
+  if (v.engine === 'lumean' && !v.lum_template_id) return 'Введи ID шаблона Lumean';
+  if (!['csv666', 'voicegen', 'lumean'].includes(v.engine) && !v.voice_id) return 'Введи voice_id';
+  return null;
 }
 
 async function saveVoice() {
   const v = readVoiceFromForm();
   if (!v.name) return toast('Введи название', 'error');
-  if (v.engine === 'csv666') {
-    if (!v.template_uuid) return toast('Введи UUID шаблона', 'error');
-  } else if (!v.voice_id) {
-    return toast('Введи voice_id', 'error');
-  }
+  const err = voiceFormError(v);
+  if (err) return toast(err, 'error');
   const res = await api().save_voice(v);
   if (res.ok) {
     editingVoice = res.voice;
@@ -5172,11 +5563,10 @@ async function saveVoice() {
 
 async function testVoice() {
   const v = readVoiceFromForm();
-  if (v.engine === 'csv666') {
-    if (!v.template_uuid) return toast('Введи UUID шаблона', 'error');
-  } else if (!v.voice_id) {
-    return toast('Введи voice_id', 'error');
-  }
+  const err = voiceFormError(v);
+  if (err) return toast(err, 'error');
+  const keyErr = missingVoiceKey([v.engine || 'voicer'], await api().load_settings());
+  if (keyErr) return toast(keyErr, 'error');
   const text = document.getElementById('voice-test-text').value.trim() || 'Привет';
   const btn = document.getElementById('voice-test-btn');
   btn.disabled = true;

@@ -173,6 +173,24 @@ def synthesize(text: str, preset_or_key, output_path: str,
             status_callback=status_callback, label=voice.get("name"))
         return
 
+    # voicegen / «test» — третья озвучка: голос собирается из полей `vg_*`.
+    if engine == "voicegen":
+        from modules import voice_api_voicegen
+        voice_api_voicegen.synthesize(
+            text, voice, output_path,
+            cancel_check=cancel_check, skip_check=skip_check,
+            status_callback=status_callback, label=voice.get("name"))
+        return
+
+    # Lumean — четвёртая озвучка: заказ по шаблону (`lum_*`).
+    if engine == "lumean":
+        from modules import voice_api_lumean
+        voice_api_lumean.synthesize(
+            text, voice, output_path,
+            cancel_check=cancel_check, skip_check=skip_check,
+            status_callback=status_callback, label=voice.get("name"))
+        return
+
     # voicer.mat3u.com — голос собирается из полного набора настроек.
     from modules.voices import to_api_preset
     preset = to_api_preset(voice)
