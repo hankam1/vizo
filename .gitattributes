@@ -1,0 +1,4 @@
+# cmd выполняет батники корректно только с CRLF: с LF он теряет символы при
+# разборе (симптом — «'EM' is not recognized»). При autocrlf=input без этого
+# правила checkout отдаёт LF и build.bat/release.bat перестают запускаться.
+*.bat text eol=crlf
