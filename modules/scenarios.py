@@ -412,6 +412,12 @@ def validate(scenario: dict) -> list:
         # step that accidentally references its own output is flagged.
         if step.get("output"):
             declared_vars.add(step["output"])
+            # Шаг озвучки дополнительно отдаёт <output>_timestamps (путь к
+            # .timestamps.json движка test). Объявляем всегда: включены ли
+            # таймстампы — известно только голосу, а не сценарию; в рантайме
+            # переменная в худшем случае будет пустой строкой.
+            if t == "voice":
+                declared_vars.add(step["output"] + "_timestamps")
 
         # Per-type required-field checks
         if t in ("claude_prompt", "gpt_prompt") and not step.get("prompt_template"):
@@ -1093,7 +1099,7 @@ class ScenarioRunner:
                         log.info("Resume: %s уже озвучен — пропускаю синтез", filename)
                         self.on_progress(idx, self._total_steps, step_name,
                                          "Готово ранее — пропущено")
-                        self._set_output(step, path)
+                        self._set_voice_outputs(step, path)
                         return
                 except OSError:
                     pass
@@ -1114,7 +1120,7 @@ class ScenarioRunner:
                 raise ScenarioCancelled() from e
             except VoiceSkipped as e:
                 raise StepSkipped() from e
-            self._set_output(step, path)
+            self._set_voice_outputs(step, path)
 
         elif t == "banana_one":
             from modules import veo_api
@@ -1601,6 +1607,19 @@ class ScenarioRunner:
         out = step.get("output")
         if out:
             self.vars[out] = value
+
+    def _set_voice_outputs(self, step: dict, path: str):
+        """Выход шага озвучки: mp3 + производная переменная
+        `<output>_timestamps` — путь к `.timestamps.json`, который движок test
+        кладёт рядом с mp3. Переменная ставится всегда (пустая строка, если
+        файла нет): вложение с пустым путём в claude_prompt молча
+        отфильтруется, а вот неопределённая переменная осталась бы в промпте
+        литералом `{voice_mp3_timestamps}`."""
+        self._set_output(step, path)
+        out = step.get("output")
+        if out:
+            ts = os.path.splitext(path)[0] + ".timestamps.json"
+            self.vars[out + "_timestamps"] = ts if os.path.exists(ts) else ""
 
     def _new_ai_session(self, provider: str):
         """Создать браузерную сессию провайдера. Импорты локальные — как и

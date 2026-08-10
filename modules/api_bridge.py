@@ -479,9 +479,9 @@ class Api:
             webview.OPEN_DIALOG,
             allow_multiple=True,
             file_types=(
-                "Картинки и текст (*.png;*.jpg;*.jpeg;*.webp;*.gif;*.txt;*.md;*.csv)",
+                "Картинки и текст (*.png;*.jpg;*.jpeg;*.webp;*.gif;*.txt;*.md;*.csv;*.json)",
                 "Картинки (*.png;*.jpg;*.jpeg;*.webp;*.gif)",
-                "Текстовые файлы (*.txt;*.md;*.csv)",
+                "Текстовые файлы (*.txt;*.md;*.csv;*.json)",
                 "Все файлы (*.*)",
             ),
         )

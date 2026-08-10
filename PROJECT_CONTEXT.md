@@ -98,7 +98,11 @@ POST `/api/v1/client/tasks` → `GET /api/v1/client/tasks/{id}` (до `done`) �
   зависит, какие параметры вообще работают (`ENGINE_PARAMS`); лишние не отправляются
 - `settings_preset` (`standard`/`stable`/`expressive`/`fast`) ЗАМЕНЯЕТ ручные настройки
 - `accent` только у `elevenLabsV3` — на другой модели сервис отвечает 400
-- `include_timestamps` (тарифы Celestial+) — JSON кладётся рядом с mp3 как `.timestamps.json`
+- `include_timestamps` (тарифы Celestial+) — JSON кладётся рядом с mp3 как
+  `.timestamps.json`; на тарифе ниже сервер молча игнорирует флаг, synthesize()
+  тогда показывает предупреждение. Шаг `voice` в сценарии всегда ставит
+  переменную `<output>_timestamps` (путь к JSON или пустая строка) — её
+  указывают во вложениях claude_prompt, чтобы отдать таймстампы ИИ без mp3
 - **`template_id` и настройки взаимоисключающи.** Шаблон уже содержит голос,
   модель, её настройки, пресет, разбивку, размер чанка и паузу — досылать их из
   vizo нельзя, они перебьют шаблон. При заполненном `template_id` уходят только

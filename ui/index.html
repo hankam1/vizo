@@ -2459,7 +2459,7 @@ audio { width: 100%; }
           <label class="vfield-label" style="margin:0;">Таймстампы слов (JSON)</label>
           <div class="vswitch" id="voice-edit-vg-timestamps" onclick="toggleSw(this)" style="margin-left:auto;"></div>
         </div>
-        <div class="vfield-hint" style="margin-top:-8px;">Доступно на тарифах Celestial и Eternal. Ложится рядом с mp3 файлом <code>.timestamps.json</code>; на других тарифах сервис молча игнорирует флаг.</div>
+        <div class="vfield-hint" style="margin-top:-8px;">Доступно на тарифах Celestial и Eternal. Ложится рядом с mp3 файлом <code>.timestamps.json</code>; на других тарифах сервис молча игнорирует флаг (сценарий покажет предупреждение). В сценарии путь к JSON доступен переменной <code>&lt;выход&gt;_timestamps</code> шага озвучки.</div>
       </div>
 
       <!-- ===== Оверрайд настроек голоса Lumean (шкала 0..1, как у ElevenLabs) ===== -->
@@ -4640,12 +4640,18 @@ function renderBody(step, idx) {
       ? ' Для вложений нужен вход в аккаунт ChatGPT (аноним не принимает файлы).' : '';
     fields.push(`<div class="vfield">
       <label class="vfield-label">Вложения (опционально)</label>
-      <div class="vfield-hint" style="margin-bottom:8px;">Файлы, которые ${aiName} получит вместе с этим промптом: картинки-примеры (png, jpg, webp) и текст (txt, md, csv) — удобно для длинных справочных материалов, чтобы не раздувать сам шаблон. Поддерживаются переменные вида <code style="font-family:'JetBrains Mono';color:var(--accent);">{thumbnail}</code>.${gptFilesNote}</div>
+      <div class="vfield-hint" style="margin-bottom:8px;">Файлы, которые ${aiName} получит вместе с этим промптом: картинки-примеры (png, jpg, webp) и текст (txt, md, csv, json) — удобно для длинных справочных материалов, чтобы не раздувать сам шаблон. «Из переменной» прикрепляет файл, путь к которому лежит в переменной предыдущего шага — например таймстампы озвучки.${gptFilesNote}</div>
       <div>${chipsHtml}</div>
-      <button class="vbtn secondary" onclick="addPromptFiles(${idx})" style="height:36px;font-size:13px;">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
-        Добавить файлы
-      </button>
+      <div style="display:flex;gap:8px;">
+        <button class="vbtn secondary" onclick="addPromptFiles(${idx})" style="height:36px;font-size:13px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+          Добавить файлы
+        </button>
+        <button class="vbtn secondary" onclick="addPromptVar(${idx})" style="height:36px;font-size:13px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12c0-4 2-6 6-6s6 2 6 6"/><path d="M6 12c0 4 2 6 6 6s6-2 6-6"/></svg>
+          Из переменной
+        </button>
+      </div>
     </div>`);
   }
   if (step.type === 'claude_chunked' || step.type === 'gpt_chunked') {
@@ -4704,7 +4710,8 @@ function renderBody(step, idx) {
     <div class="vfield">
       <label class="vfield-label">Имя файла</label>
       <input class="vinput" value="${escapeHtml(step.filename || 'voice.mp3')}" oninput="updateStep(${idx}, 'filename', this.value)">
-    </div>`);
+    </div>
+    <div class="vfield-hint" style="margin-top:-8px;">Если у голоса (движок test) включены таймстампы — путь к их JSON попадёт в переменную <code style="font-family:'JetBrains Mono';color:var(--accent);">{${escapeHtml((step.output || 'voice_mp3'))}_timestamps}</code>. Её можно указать во вложениях шага Claude, чтобы отдать таймстампы без самой озвучки. Если сервис таймстампы не отдал — переменная пустая, вложение молча пропустится.</div>`);
   }
   if (step.type === 'save_txt' || step.type === 'save_json') {
     fields.push(`<div class="vfield">
@@ -4821,6 +4828,57 @@ function removePromptFile(stepIdx, fileIdx) {
   const step = editingScenario.steps[stepIdx];
   if (!step || !Array.isArray(step.file_paths)) return;
   step.file_paths.splice(fileIdx, 1);
+  markDirty();
+  renderChain();
+}
+
+// Переменные-пути, доступные шагу idx: выходы предыдущих шагов + производные
+// (шаг озвучки кроме mp3 отдаёт <output>_timestamps — путь к JSON таймстампов
+// движка test). Раньше такую переменную можно было вписать только руками в
+// JSON сценария — кнопка «Из переменной» делает это выбором из списка.
+function varsAvailableBefore(idx) {
+  const out = [];
+  (editingScenario.steps || []).slice(0, idx).forEach(st => {
+    // Подстановка понимает только {\w+} — имена с другими символами всё равно
+    // не сработают, а в onclick они бы ещё и ломали разметку.
+    if (!st.output || !/^\w+$/.test(st.output)) return;
+    const stepName = st.name || st.type;
+    if (st.type === 'voice') {
+      out.push({ name: st.output, hint: `mp3 озвучки «${stepName}»` });
+      out.push({ name: st.output + '_timestamps',
+                 hint: `JSON таймстампов озвучки «${stepName}» (движок test)` });
+    } else {
+      out.push({ name: st.output, hint: `результат шага «${stepName}»` });
+    }
+  });
+  return out;
+}
+
+function addPromptVar(idx) {
+  const step = editingScenario.steps[idx];
+  const attached = new Set(Array.isArray(step && step.file_paths) ? step.file_paths : []);
+  const vars = varsAvailableBefore(idx).filter(v => !attached.has(`{${v.name}}`));
+  const body = vars.length
+    ? `<div class="vactions">${vars.map(v => `<button class="vkebab-item" onclick="closeModal(); pickPromptVar(${idx}, '${v.name}')">
+        <span class="vkebab-item-label" style="font-family:'JetBrains Mono';color:var(--accent);">{${escapeHtml(v.name)}}</span>
+        <span style="color:var(--ink-2);font-size:12px;margin-left:auto;text-align:right;">${escapeHtml(v.hint)}</span>
+      </button>`).join('')}</div>`
+    : `<div style="padding:0 20px 20px;color:var(--ink-2);font-size:14px;line-height:1.5;">У шагов выше нет выходных переменных. Заполни «Имя выходной переменной» у предыдущих шагов — их результаты появятся в этом списке.</div>`;
+  showModal(`<div class="vmodal" style="width:440px;">
+    <div class="vmodal-titlebar">
+      <h3>Прикрепить из переменной</h3>
+      <button class="vmodal-close" onclick="closeModal()" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="vfield-hint" style="padding:0 20px 12px;">Переменная должна содержать путь к файлу. Если в момент запуска файла нет (например сервис не отдал таймстампы) — вложение молча пропустится.</div>
+    ${body}
+  </div>`);
+}
+
+function pickPromptVar(idx, name) {
+  const step = editingScenario.steps[idx];
+  if (!step) return;
+  if (!Array.isArray(step.file_paths)) step.file_paths = [];
+  step.file_paths.push(`{${name}}`);
   markDirty();
   renderChain();
 }

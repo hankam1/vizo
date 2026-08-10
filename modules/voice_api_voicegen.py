@@ -318,27 +318,31 @@ def _download_result(task_id: str, output_path: str) -> None:
     os.replace(tmp, output_path)
 
 
-def _download_timestamps(task: dict, output_path: str) -> None:
+def _download_timestamps(task: dict, output_path: str) -> bool:
     """Таймстампы слов отдаются отдельным JSON по подписанной ссылке.
 
-    Не критично для пайплайна: если сервис их не отдал (нет подписки Celestial
-    и выше — сервер молча ставит include_timestamps=false), просто пропускаем.
+    Пайплайн озвучку из-за них не роняет, но и молчать нельзя: сценарий может
+    строиться вокруг таймстампов (переменная `<output>_timestamps` уходит в
+    Claude), и тихий провал всплыл бы только в самом конце. Возвращаем успех,
+    чтобы synthesize() показал предупреждение.
     """
     url = task.get("timestamps_url")
     if not url:
-        return
+        # Нет подписки Celestial+ — сервер молча ставит include_timestamps=false.
+        return False
     try:
         r = requests.get(url, allow_redirects=True, timeout=DOWNLOAD_TIMEOUT_SEC)
         if r.status_code >= 400:
-            return
+            return False
         base = os.path.splitext(output_path)[0]
         tmp = base + ".timestamps.json.tmp"
         with open(tmp, "wb") as f:
             f.write(r.content)
         os.replace(tmp, base + ".timestamps.json")
         print(f"Таймстампы сохранены → {base}.timestamps.json")
+        return True
     except Exception:
-        pass
+        return False
 
 
 def synthesize(text: str, voice: dict, output_path: str,
@@ -360,5 +364,13 @@ def synthesize(text: str, voice: dict, output_path: str,
     print("Скачиваю аудио...")
     _download_result(task_id, output_path)
     if voice.get("vg_include_timestamps"):
-        _download_timestamps(done, output_path)
+        if not _download_timestamps(done, output_path):
+            warn = ("Таймстампы запрошены, но сервис их не отдал (нужен тариф "
+                    "Celestial или выше) — продолжаю без них")
+            print(f"[{SERVICE_NAME}] {warn}")
+            if status_callback:
+                try:
+                    status_callback(warn)
+                except Exception:
+                    pass
     print(f"Аудио сохранено → {output_path}")
