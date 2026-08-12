@@ -848,10 +848,13 @@ class ClaudeAutomation:
         _last_progress = _loop.time()
         _last_seen_len = -1
 
+        # textContent, НЕ innerText: innerText форсит пересчёт layout всей
+        # страницы на каждый вызов — на огромном чате при опросе 2 раза/с это
+        # намертво вешает вкладку (разбор в gpt_ui.wait_for_response).
         async def note_progress():
             nonlocal _last_progress, _last_seen_len
             cur = await self._safe_eval(
-                "() => document.body.innerText.length", default=_last_seen_len)
+                "() => document.body.textContent.length", default=_last_seen_len)
             if cur != _last_seen_len:
                 _last_seen_len = cur
                 _last_progress = _loop.time()
@@ -909,7 +912,7 @@ class ClaudeAutomation:
         log.warning("Stop button never appeared — falling back to copy/length detection")
         stable = 0
         await asyncio.sleep(2)
-        start_len = await self._safe_eval("() => document.body.innerText.length", default=0)
+        start_len = await self._safe_eval("() => document.body.textContent.length", default=0)
         prev_len = start_len
         while True:
             check_cancel()
@@ -922,7 +925,7 @@ class ClaudeAutomation:
             # default=start_len → a transient nav reads as "no growth", so it
             # neither advances nor resets the stability counter.
             cur_len = await self._safe_eval(
-                "() => document.body.innerText.length", default=start_len)
+                "() => document.body.textContent.length", default=start_len)
             if cur_len - start_len > min_growth:
                 if cur_len == prev_len:
                     stable += 1

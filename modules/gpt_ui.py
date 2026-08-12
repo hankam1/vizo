@@ -824,10 +824,17 @@ class GPTAutomation:
         _last_progress = _loop.time()
         _last_seen_len = -1
 
+        # Метрика прогресса — textContent, НЕ innerText: чтение innerText
+        # требует актуального layout, т.е. каждый вызов заставляет браузер
+        # пересчитать стили и раскладку ВСЕЙ страницы. На огромном чате
+        # (длинное видео: гигантский промпт + длинный стримящийся ответ) это
+        # секунды на вызов, а при опросе 2 раза/с главный поток вкладки занят
+        # безвылазно — окно «не отвечает» всю генерацию. textContent — простой
+        # обход DOM без layout, миллисекунды даже на мегабайтных чатах.
         async def note_progress():
             nonlocal _last_progress, _last_seen_len
             cur = await self._safe_eval(
-                "() => document.body.innerText.length", default=_last_seen_len)
+                "() => document.body.textContent.length", default=_last_seen_len)
             if cur != _last_seen_len:
                 _last_seen_len = cur
                 _last_progress = _loop.time()
@@ -886,7 +893,7 @@ class GPTAutomation:
         log.warning("Stop button never appeared — falling back to copy/length detection")
         stable = 0
         await asyncio.sleep(2)
-        start_len = await self._safe_eval("() => document.body.innerText.length", default=0)
+        start_len = await self._safe_eval("() => document.body.textContent.length", default=0)
         prev_len = start_len
         while True:
             check_cancel()
@@ -897,7 +904,7 @@ class GPTAutomation:
                 await asyncio.sleep(1)
                 return await self._last_response_text()
             cur_len = await self._safe_eval(
-                "() => document.body.innerText.length", default=start_len)
+                "() => document.body.textContent.length", default=start_len)
             if cur_len - start_len > min_growth:
                 if cur_len == prev_len:
                     stable += 1
