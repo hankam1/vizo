@@ -874,11 +874,32 @@ class GPTAutomation:
 
         if stop_seen:
             # Phase 2: ждём исчезновения Stop-кнопки — без общего лимита.
+            #
+            # Зависший стрим: на больших чатах chatgpt.com иногда застревает в
+            # состоянии «генерирую» — ответ дописан, но stop-кнопка не исчезает
+            # и action-bar с copy не появляется. Ждать её вечно бессмысленно
+            # (раньше шаг висел до idle-таймаута и падал). Два выхода:
+            # 1) copy-бар всё же появился при живой stop-кнопке → ответ готов;
+            # 2) страница долго (STUCK_RELOAD_SEC) не меняется → перезагружаем
+            #    вкладку: ответ уже сохранён на сервере, после reload чат
+            #    приходит в норму и stop-кнопки нет. Если генерация реально
+            #    идёт — стрим после reload продолжается, stop-кнопка вернётся
+            #    и мы просто ждём дальше. Максимум 2 перезагрузки, дальше
+            #    решает штатный idle-watchdog.
+            STUCK_RELOAD_SEC = 180.0
+            stuck_limit = (min(STUCK_RELOAD_SEC, _idle_limit * 0.6)
+                           if _idle_limit else STUCK_RELOAD_SEC)
+            reloads = 0
             gone_checks = 0
             while True:
                 check_cancel()
                 await note_progress()
                 check_deadline()
+                if await finished_via_copy():
+                    log.info("ChatGPT finished generating (copy button while "
+                             "stop still visible — stuck stream)")
+                    await asyncio.sleep(1)
+                    return await self._last_response_text()
                 if not await self._stop_button_present():
                     gone_checks += 1
                     if gone_checks >= 4:  # 2s stable absence
@@ -887,6 +908,24 @@ class GPTAutomation:
                         return await self._last_response_text()
                 else:
                     gone_checks = 0
+                    stuck_for = _loop.time() - _last_progress
+                    if stuck_for > stuck_limit and reloads < 2:
+                        reloads += 1
+                        log.warning(
+                            "Стрим завис: страница ~%dс без изменений при "
+                            "видимой stop-кнопке — перезагружаю вкладку "
+                            "(%d/2)", int(stuck_for), reloads)
+                        try:
+                            await self.page.reload(
+                                wait_until="domcontentloaded", timeout=45_000)
+                        except Exception as e:
+                            log.warning("Перезагрузка вкладки не удалась: %s", e)
+                        await asyncio.sleep(3)
+                        await self._dismiss_login_modal()
+                        # Перезапустить отсчёт: после reload странице нужно
+                        # время дорендерить историю чата.
+                        _last_progress = _loop.time()
+                        _last_seen_len = -1
                 await asyncio.sleep(0.5)
 
         # Fallback: stop-кнопку не увидели.
