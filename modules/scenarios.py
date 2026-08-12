@@ -957,9 +957,7 @@ class ScenarioRunner:
             sess = self._require_ai_session(provider)
             tpl = step.get("prompt_template", "")
             prompt = substitute(tpl, self.vars)
-            file_paths = step.get("file_paths") or []
-            file_paths = [substitute(p, self.vars) if isinstance(p, str) else p for p in file_paths]
-            file_paths = [p for p in file_paths if p and os.path.exists(p)]
+            file_paths = self._resolve_attachments(step)
             timeout = int(step.get("timeout", 600))
             await sess.send_message(prompt, file_paths or None)
             reply = await sess.wait_for_response(timeout=timeout, is_cancelled=self._cancelled)
@@ -1620,6 +1618,54 @@ class ScenarioRunner:
         if out:
             ts = os.path.splitext(path)[0] + ".timestamps.json"
             self.vars[out + "_timestamps"] = ts if os.path.exists(ts) else ""
+
+    def _resolve_attachments(self, step: dict) -> list:
+        """Вложения AI-шага (`file_paths`). Элемент — путь на диске (возможно
+        с {переменными} внутри) или голая `{переменная}` из кнопки «Из
+        переменной». Путь к существующему файлу прикрепляется как есть, но
+        выходы большинства шагов — ТЕКСТ (ответ AI, транскрипт), а не путь:
+        такой текст пишем в <output_dir>/attachments/<имя>.txt и прикрепляем
+        файлом — иначе вложение молча отфильтровывалось бы как несуществующий
+        путь. Выход-СПИСОК путей (banana_batch) прикрепляется поэлементно.
+        Пустая переменная — вложение пропускается (это штатно: таймстампов
+        могло не быть)."""
+        out = []
+        for raw in step.get("file_paths") or []:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            resolved = substitute(raw, self.vars)
+            if resolved and os.path.exists(resolved):
+                out.append(resolved)
+                continue
+            m = re.fullmatch(r"\{(\w+)\}", raw.strip())
+            if not m:
+                log.warning("Вложение «%s» не найдено на диске — пропускаю", resolved)
+                continue
+            name = m.group(1)
+            val = self.vars.get(name)
+            if isinstance(val, (list, tuple)):
+                existing = [str(p) for p in val
+                            if isinstance(p, str) and os.path.exists(p)]
+                if len(existing) < len(val):
+                    log.warning("Вложение {%s}: %d из %d путей нет на диске",
+                                name, len(val) - len(existing), len(val))
+                out.extend(existing)
+                continue
+            if isinstance(val, dict):
+                text, ext = json.dumps(val, ensure_ascii=False, indent=2), ".json"
+            else:
+                text, ext = ("" if val is None else str(val)), ".txt"
+            if not text.strip():
+                log.info("Вложение {%s}: переменная пуста — пропускаю", name)
+                continue
+            att_dir = os.path.join(self.output_dir, "attachments")
+            os.makedirs(att_dir, exist_ok=True)
+            path = os.path.join(att_dir, name + ext)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            log.info("Вложение {%s}: текст → %s (%d симв.)", name, path, len(text))
+            out.append(path)
+        return out
 
     def _new_ai_session(self, provider: str):
         """Создать браузерную сессию провайдера. Импорты локальные — как и

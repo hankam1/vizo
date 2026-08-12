@@ -4640,7 +4640,7 @@ function renderBody(step, idx) {
       ? ' Для вложений нужен вход в аккаунт ChatGPT (аноним не принимает файлы).' : '';
     fields.push(`<div class="vfield">
       <label class="vfield-label">Вложения (опционально)</label>
-      <div class="vfield-hint" style="margin-bottom:8px;">Файлы, которые ${aiName} получит вместе с этим промптом: картинки-примеры (png, jpg, webp) и текст (txt, md, csv, json) — удобно для длинных справочных материалов, чтобы не раздувать сам шаблон. «Из переменной» прикрепляет файл, путь к которому лежит в переменной предыдущего шага — например таймстампы озвучки.${gptFilesNote}</div>
+      <div class="vfield-hint" style="margin-bottom:8px;">Файлы, которые ${aiName} получит вместе с этим промптом: картинки-примеры (png, jpg, webp) и текст (txt, md, csv, json) — удобно для длинных справочных материалов, чтобы не раздувать сам шаблон. «Из переменной» прикрепляет результат предыдущего шага: путь к файлу (mp3, таймстампы, картинки) — сам файл, текст (ответ AI, транскрипт) — отдельным txt-файлом.${gptFilesNote}</div>
       <div>${chipsHtml}</div>
       <div style="display:flex;gap:8px;">
         <button class="vbtn secondary" onclick="addPromptFiles(${idx})" style="height:36px;font-size:13px;">
@@ -4869,7 +4869,7 @@ function addPromptVar(idx) {
       <h3>Прикрепить из переменной</h3>
       <button class="vmodal-close" onclick="closeModal()" aria-label="Закрыть">✕</button>
     </div>
-    <div class="vfield-hint" style="padding:0 20px 12px;">Переменная должна содержать путь к файлу. Если в момент запуска файла нет (например сервис не отдал таймстампы) — вложение молча пропустится.</div>
+    <div class="vfield-hint" style="padding:0 20px 12px;">Если в переменной путь к файлу — прикрепится сам файл, если текст (ответ AI, транскрипт) — он уедет отдельным txt-вложением, не раздувая промпт. Пустая переменная в момент запуска — вложение молча пропустится.</div>
     ${body}
   </div>`);
 }
