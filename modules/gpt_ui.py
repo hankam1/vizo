@@ -45,6 +45,10 @@ INPUT_SELECTORS = [
 ]
 STOP_SELECTORS_JS = [
     'button[data-testid="stop-button"]',
+    # aria-фолбэки на случай пропажи testid. Подпись у chatgpt.com гуляет
+    # ("Stop streaming" → "Stop answering", сверено dom-зондом 2026-08-12) и
+    # ЛОКАЛИЗУЕТСЯ — на не-английском UI работает только testid.
+    'button[aria-label="Stop answering"]',
     'button[aria-label="Stop streaming"]',
     'button[aria-label="Stop generating"]',
 ]
