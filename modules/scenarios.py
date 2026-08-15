@@ -42,6 +42,7 @@ from modules.logger import get as get_logger
 log = get_logger("vizo.scenarios")
 
 SCENARIOS_FILE = os.path.join(USER_DATA_DIR, "user_scenarios.json")
+FOLDERS_FILE = os.path.join(USER_DATA_DIR, "user_scenario_folders.json")
 
 
 def _build_tartaria_scenario():
@@ -253,6 +254,98 @@ def duplicate(scenario_id: str) -> Optional[dict]:
     dup.pop("id", None)
     dup["name"] = (src.get("name") or "Сценарий") + " (копия)"
     return save(dup)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# FOLDERS
+#
+# Папки — лёгкая локальная группировка: {"id": "f_xxx", "name", "created_at"}.
+# Сценарий указывает на папку необязательным полем folder_id; сами сценарии
+# остаются плоским списком в user_scenarios.json, так что старые версии
+# приложения это поле просто игнорируют.
+
+def _read_folders() -> list:
+    if not os.path.exists(FOLDERS_FILE):
+        return []
+    try:
+        with open(FOLDERS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        log.error("user_scenario_folders.json повреждён — папки не загружены")
+    return []
+
+
+def _write_folders(folders: list) -> None:
+    os.makedirs(os.path.dirname(FOLDERS_FILE) or ".", exist_ok=True)
+    tmp = FOLDERS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(folders, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, FOLDERS_FILE)
+
+
+def load_folders() -> list:
+    return _read_folders()
+
+
+def get_folder(folder_id: str) -> Optional[dict]:
+    for fo in _read_folders():
+        if fo.get("id") == folder_id:
+            return fo
+    return None
+
+
+def save_folder(folder: dict) -> dict:
+    folders = _read_folders()
+    fid = folder.get("id")
+    if not fid:
+        folder["id"] = "f_" + uuid.uuid4().hex[:10]
+        folder.setdefault("created_at", datetime.now().isoformat())
+        folders.append(folder)
+    else:
+        for i, fo in enumerate(folders):
+            if fo.get("id") == fid:
+                folders[i] = {**fo, **folder}
+                folder = folders[i]
+                break
+        else:
+            folders.append(folder)
+    _write_folders(folders)
+    return folder
+
+
+def delete_folder(folder_id: str) -> bool:
+    """Удаляет папку; её сценарии не трогаем — только отвязываем (в корень)."""
+    folders = _read_folders()
+    new_list = [fo for fo in folders if fo.get("id") != folder_id]
+    if len(new_list) == len(folders):
+        return False
+    _write_folders(new_list)
+    scenarios = load_all()
+    changed = False
+    for s in scenarios:
+        if s.get("folder_id") == folder_id:
+            s.pop("folder_id", None)
+            changed = True
+    if changed:
+        _write_file(scenarios)
+    return True
+
+
+def set_scenario_folder(scenario_id: str, folder_id: Optional[str]) -> bool:
+    scenarios = load_all()
+    for s in scenarios:
+        if s.get("id") == scenario_id:
+            if folder_id:
+                s["folder_id"] = folder_id
+            else:
+                s.pop("folder_id", None)
+            _write_file(scenarios)
+            return True
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────

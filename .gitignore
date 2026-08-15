@@ -10,6 +10,7 @@ claude_auth.json
 # the default set comes from code _all_builtins(), so users don't need these).
 # To ship a scenario to everyone, add it to _all_builtins() in code instead.
 user_scenarios.json
+user_scenario_folders.json
 user_voices.json
 user_languages.json
 # Claude browser session (cookies / tokens)

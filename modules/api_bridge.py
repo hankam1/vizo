@@ -833,6 +833,26 @@ class Api:
         s = scenarios_mod.duplicate(scenario_id)
         return {"ok": bool(s), "scenario": s}
 
+    # --- Scenario folders ---
+
+    def list_scenario_folders(self):
+        try:
+            return scenarios_mod.load_folders()
+        except Exception as e:
+            return {"error": str(e)}
+
+    def save_scenario_folder(self, folder: dict):
+        try:
+            return {"ok": True, "folder": scenarios_mod.save_folder(folder)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def delete_scenario_folder(self, folder_id: str):
+        return {"ok": scenarios_mod.delete_folder(folder_id)}
+
+    def move_scenario_to_folder(self, scenario_id: str, folder_id: str = None):
+        return {"ok": scenarios_mod.set_scenario_folder(scenario_id, folder_id or None)}
+
     # --- Scenario export / import ---
 
     def build_export(self, scenario_id: str):
@@ -846,8 +866,9 @@ class Api:
             return {"ok": False, "error": "Сценарий не найден"}
         # Deep-copy so we don't mutate the persisted scenario
         sc_clean = _json.loads(_json.dumps(sc))
-        # Strip runtime/identifier fields
-        for k in ("id", "last_run_at", "builtin"):
+        # Strip runtime/identifier fields (folder_id — локальная группировка,
+        # у получателя такой папки нет)
+        for k in ("id", "last_run_at", "builtin", "folder_id"):
             sc_clean.pop(k, None)
         # Inline file paths → {"$file": hash} refs, collecting bytes in `files`
         files: dict = {}
@@ -869,6 +890,50 @@ class Api:
                 "files": files,
             },
             "suggested_name": sc.get("name") or "scenario",
+            "file_count": len(files),
+        }
+
+    def build_folder_export(self, folder_id: str):
+        """Build a self-contained payload for a whole folder of scenarios.
+
+        Same wire format idea as build_export, but kind="folder": the folder
+        name plus every scenario inside it, with voices and files inlined once
+        (deduplicated across scenarios by content hash)."""
+        import json as _json
+        folder = scenarios_mod.get_folder(folder_id)
+        if not folder:
+            return {"ok": False, "error": "Папка не найдена"}
+        members = [s for s in scenarios_mod.load_all()
+                   if s.get("folder_id") == folder_id]
+        if not members:
+            return {"ok": False, "error": "В папке нет сценариев"}
+        files: dict = {}
+        voice_ids = set()
+        cleaned = []
+        for sc in members:
+            sc_clean = _json.loads(_json.dumps(sc))
+            for k in ("id", "last_run_at", "builtin", "pinned", "folder_id"):
+                sc_clean.pop(k, None)
+            _inline_scenario_files(sc_clean, files)
+            for step in sc.get("steps", []):
+                if step.get("type") == "voice" and step.get("preset"):
+                    voice_ids.add(step["preset"])
+            cleaned.append(sc_clean)
+        voices_by_id = {v.get("id"): v for v in voices_mod.load_all()}
+        voices = [voices_by_id[vid] for vid in voice_ids if vid in voices_by_id]
+        return {
+            "ok": True,
+            "payload": {
+                "vizo_version": 1,
+                "kind": "folder",
+                "exported_at": datetime.now().isoformat(),
+                "folder": {"name": folder.get("name") or "Папка"},
+                "scenarios": cleaned,
+                "voices": voices,
+                "files": files,
+            },
+            "suggested_name": folder.get("name") or "folder",
+            "scenario_count": len(cleaned),
             "file_count": len(files),
         }
 
@@ -919,7 +984,11 @@ class Api:
                 payload = _json.load(f)
         except Exception as e:
             return {"ok": False, "error": f"Не удалось прочитать файл: {e}"}
-        if not isinstance(payload, dict) or "scenario" not in payload:
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "Это не файл сценария vizo"}
+        if payload.get("kind") == "folder" or isinstance(payload.get("scenarios"), list):
+            return self._describe_folder_import(payload)
+        if "scenario" not in payload:
             return {"ok": False, "error": "Это не файл сценария vizo"}
         sc = payload.get("scenario") or {}
         if not isinstance(sc, dict) or not isinstance(sc.get("steps"), list):
@@ -951,6 +1020,7 @@ class Api:
                     pass
         return {
             "ok": True,
+            "kind": "scenario",
             "payload": payload,
             "name": name,
             "icon": sc.get("icon") or "🔗",
@@ -959,6 +1029,51 @@ class Api:
             "conflict_id": conflict_id,
             "missing_voices": missing_voices,
             "file_count": file_count,
+            "file_total_size": file_total_size,
+        }
+
+    def _describe_folder_import(self, payload: dict):
+        """Parse a folder payload; return preview + conflict info, no writes."""
+        folder = payload.get("folder") or {}
+        scenarios = [s for s in (payload.get("scenarios") or [])
+                     if isinstance(s, dict) and isinstance(s.get("steps"), list)]
+        if not scenarios:
+            return {"ok": False, "error": "В файле папки нет сценариев"}
+        name = (folder.get("name") if isinstance(folder, dict) else None) or "Папка"
+        folder_conflict_id = None
+        for fo in scenarios_mod.load_folders():
+            if fo.get("name") == name:
+                folder_conflict_id = fo.get("id")
+                break
+        existing_voice_ids = {v.get("id") for v in voices_mod.load_all()}
+        missing_voices = [
+            {"id": v.get("id"), "name": v.get("name") or v.get("id")}
+            for v in (payload.get("voices") or [])
+            if v.get("id") and v.get("id") not in existing_voice_ids
+        ]
+        files = payload.get("files") or {}
+        file_total_size = 0
+        if isinstance(files, dict):
+            for finfo in files.values():
+                try:
+                    file_total_size += int(finfo.get("size", 0))
+                except Exception:
+                    pass
+        return {
+            "ok": True,
+            "kind": "folder",
+            "payload": payload,
+            "name": name,
+            "scenario_count": len(scenarios),
+            "scenarios": [
+                {"name": s.get("name") or "Без названия",
+                 "icon": s.get("icon") or "🔗",
+                 "step_count": len(s.get("steps", []))}
+                for s in scenarios
+            ],
+            "folder_conflict_id": folder_conflict_id,
+            "missing_voices": missing_voices,
+            "file_count": len(files) if isinstance(files, dict) else 0,
             "file_total_size": file_total_size,
         }
 
@@ -981,24 +1096,11 @@ class Api:
         sc = dict(sc_src)
         sc.pop("id", None)
         sc.pop("last_run_at", None)
-        sc.pop("builtin", None)  # imported is never builtin
-        sc.pop("pinned", None)   # don't inherit pin state
+        sc.pop("builtin", None)    # imported is never builtin
+        sc.pop("pinned", None)     # don't inherit pin state
+        sc.pop("folder_id", None)  # sender's folder doesn't exist here
 
-        # Voice imports (skip ones already present by id)
-        voice_count = 0
-        if import_voices:
-            existing_ids = {v.get("id") for v in voices_mod.load_all()}
-            for v in (payload.get("voices") or []):
-                vid = v.get("id")
-                if not vid or vid in existing_ids:
-                    continue
-                v_clean = dict(v)
-                v_clean["builtin"] = False
-                try:
-                    voices_mod.save(v_clean)
-                    voice_count += 1
-                except Exception:
-                    pass
+        voice_count = self._import_missing_voices(payload) if import_voices else 0
 
         if mode == "replace" and conflict_id:
             sc["id"] = conflict_id
@@ -1023,6 +1125,91 @@ class Api:
         return {
             "ok": True,
             "scenario": saved,
+            "voices_imported": voice_count,
+            "files_written": files_written,
+        }
+
+    def _import_missing_voices(self, payload: dict) -> int:
+        """Add payload voices that aren't installed yet. Returns count added."""
+        count = 0
+        existing_ids = {v.get("id") for v in voices_mod.load_all()}
+        for v in (payload.get("voices") or []):
+            vid = v.get("id")
+            if not vid or vid in existing_ids:
+                continue
+            v_clean = dict(v)
+            v_clean["builtin"] = False
+            try:
+                voices_mod.save(v_clean)
+                count += 1
+            except Exception:
+                pass
+        return count
+
+    def commit_folder_import(self, payload: dict, options: dict = None):
+        """Persist an imported folder with all its scenarios.
+
+        options:
+          mode: "merge" | "new" — при совпадении имени папки: докинуть сценарии
+                в существующую или создать новую «… (импорт)»
+          folder_conflict_id: id существующей папки (для mode=merge)
+          import_voices: True/False
+        """
+        options = options or {}
+        mode = options.get("mode") or "new"
+        import_voices = options.get("import_voices", True)
+        conflict_id = options.get("folder_conflict_id")
+
+        src_list = payload.get("scenarios") if isinstance(payload, dict) else None
+        src_list = [s for s in (src_list or [])
+                    if isinstance(s, dict) and isinstance(s.get("steps"), list)]
+        if not src_list:
+            return {"ok": False, "error": "В файле папки нет сценариев"}
+
+        folder_meta = payload.get("folder") or {}
+        name = (folder_meta.get("name") if isinstance(folder_meta, dict) else None) or "Папка"
+
+        if mode == "merge" and conflict_id and scenarios_mod.get_folder(conflict_id):
+            folder = scenarios_mod.get_folder(conflict_id)
+        else:
+            if conflict_id:
+                name = name + " (импорт)"
+            try:
+                folder = scenarios_mod.save_folder({"name": name})
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
+        voice_count = self._import_missing_voices(payload) if import_voices else 0
+
+        files_index = payload.get("files") or {}
+        imported = 0
+        files_written = 0
+        for sc_src in src_list:
+            sc = dict(sc_src)
+            for k in ("id", "last_run_at", "builtin", "pinned"):
+                sc.pop(k, None)
+            sc["folder_id"] = folder.get("id")
+            try:
+                saved = scenarios_mod.save(sc)
+            except Exception:
+                continue
+            imported += 1
+            if isinstance(files_index, dict) and files_index:
+                target_dir = os.path.join(USER_DATA_DIR, "imported_assets",
+                                          saved.get("id") or "")
+                n = _materialize_scenario_files(saved, files_index, target_dir)
+                if n:
+                    files_written += n
+                    try:
+                        scenarios_mod.save(saved)
+                    except Exception:
+                        pass
+        if not imported:
+            return {"ok": False, "error": "Не удалось сохранить сценарии"}
+        return {
+            "ok": True,
+            "folder": folder,
+            "scenarios_imported": imported,
             "voices_imported": voice_count,
             "files_written": files_written,
         }
