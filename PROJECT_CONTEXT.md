@@ -152,10 +152,11 @@ POST `/orders` → `GET /orders/{id}` (до `completed`) → `POST /storage/url`
 ### VeoNonStop API (картинки + видео)
 - Base URL: `https://veononstop.org/api/v1`
 - Auth: `X-API-Key: veo_...` header
-- **Картинки** (Banana) — `POST /image/banana/generate` синхронно, 1–8 за вызов, возвращает `fifeUrl` (Google Cloud Storage signed, ~30 мин)
+- **Картинки** (Banana) — `POST /image/banana/generate` асинхронно (апдейт API): POST → `task_id` → опрос `GET /video/status/{task_id}` (общий эндпоинт с видео), completed-ответ содержит `images[]` с `fifeUrl` (Google Cloud Storage signed, ~30 мин) и `mediaGenerationId`. 1–8 картинок за вызов, типичная генерация 1–3 мин, опрос каждые 10с
   - Модели: `GEM_PIX_2` (default), `NARWHAL`
   - Aspect ratios: 16:9, 9:16, 1:1, 4:3, 3:4
-  - Апскейл: `/image/banana/upscale` (2K/4K, возвращает base64 JPEG)
+  - Апскейл: `/image/banana/upscale` (2K/4K) — тоже асинхронный, результат в `images[]` как base64 Data URI
+  - В `veo_api.py` асинхронность спрятана внутри клиента: `banana_generate_*`/`upscale_image` сами ждут завершения и возвращают результат в прежней форме (`media[]`)
 - **Видео** — асинхронно: POST → `task_id` → `GET /video/status/{task_id}` → `GET /video/download/{task_id}`
   - Эндпоинты: `text-to-video`, `image-to-video`, `multi-image-to-video`, `batch-frame`, `upsample`
   - Длительности: 4s/6s/8s, count: 1–4, aspect: 16:9/9:16

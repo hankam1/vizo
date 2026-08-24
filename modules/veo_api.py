@@ -3,7 +3,8 @@
 База: https://veononstop.org/api/v1
 Авторизация: X-API-Key с префиксом 'veo_'.
 
-Картинки (Banana) — синхронные, видео — асинхронные с polling.
+Картинки (Banana) и видео — асинхронные: POST возвращает task_id,
+результат забирается опросом GET /video/status/:taskId.
 """
 
 import asyncio
@@ -26,6 +27,8 @@ DEFAULT_IMAGE_MODEL = "GEM_PIX_2"
 DEFAULT_IMAGE_ASPECT = "16:9"
 VIDEO_POLL_INTERVAL_SEC = 10
 VIDEO_TIMEOUT_SEC = 1800  # 30 минут — лимит сервиса
+IMAGE_POLL_INTERVAL_SEC = 10  # рекомендация дока: опрос каждые 10с
+IMAGE_TIMEOUT_SEC = 900  # типичная генерация 1–3 мин, берём с запасом
 # Сколько подряд неудачных опросов статуса терпим. VeoNonStop при сбоях своей
 # инфраструктуры отдаёт 503 ("API key validation service unavailable")
 # по несколько минут — оплаченный рендер из-за этого убивать нельзя.
@@ -76,6 +79,64 @@ def get_concurrency_limit(default: int = 4) -> int:
 
 # ---------- картинки (Banana) ----------
 
+def _norm_image_result(data: dict) -> dict:
+    """Completed-ответ статуса кладёт картинки в 'images'; исторически весь
+    остальной код (scenarios._save_banana, api_bridge) читает 'media' —
+    дублируем под старым именем, чтобы не трогать потребителей."""
+    if not data.get("media"):
+        data["media"] = data.get("images") or []
+    return data
+
+
+async def _await_banana_task(
+    session: aiohttp.ClientSession,
+    task_id: str,
+    timeout: int = IMAGE_TIMEOUT_SEC,
+) -> dict:
+    """Опрос /video/status/:taskId до completed (общий эндпоинт статусов,
+    картиночные задачи тоже живут там). Временные сбои опроса терпим до
+    MAX_POLL_FAILURES подряд — оплаченную задачу из-за сетевого глюка не роняем.
+    При отмене снаружи (CancelledError) шлём best-effort cancel на сервер,
+    чтобы не жечь кредиты."""
+    deadline = time.time() + timeout
+    poll_failures = 0
+    try:
+        while time.time() < deadline:
+            try:
+                async with session.get(
+                    f"{VEO_BASE}/video/status/{task_id}",
+                    headers=_headers(),
+                ) as r:
+                    text = await r.text()
+                    if r.status >= 400:
+                        raise Exception(f"video/status {r.status}: {text[:300]}")
+                    data = _check(_json.loads(text), "video/status")
+                poll_failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                poll_failures += 1
+                if poll_failures >= MAX_POLL_FAILURES:
+                    raise
+                await asyncio.sleep(IMAGE_POLL_INTERVAL_SEC)
+                continue
+            status = str(data.get("status", "")).lower()
+            if status == "completed":
+                return _norm_image_result(data)
+            if status == "failed":
+                raise Exception(f"banana failed: {data.get('error', 'unknown')}")
+            if status in ("cancelled", "canceled"):
+                raise Exception(f"banana cancelled: {task_id}")
+            await asyncio.sleep(IMAGE_POLL_INTERVAL_SEC)
+        raise TimeoutError(f"Картинка {task_id} не завершилась за {timeout}с")
+    except asyncio.CancelledError:
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, cancel_task, task_id)
+        except Exception:
+            pass
+        raise
+
+
 async def _banana_post(
     session: aiohttp.ClientSession,
     prompt: str,
@@ -106,7 +167,17 @@ async def _banana_post(
         text = await r.text()
         if r.status >= 400:
             raise Exception(f"banana/generate {r.status}: {text[:300]}")
-        return _check(_json.loads(text), "banana/generate")
+        data = _check(_json.loads(text), "banana/generate")
+
+    # С апдейта Banana генерация асинхронная: сразу приходит только task_id,
+    # картинки забираем опросом статуса. Ответ со старым синхронным телом
+    # (media[] без task_id) на всякий случай тоже принимаем.
+    if data.get("media") or data.get("images"):
+        return _norm_image_result(data)
+    task_id = data.get("task_id")
+    if not task_id:
+        raise Exception("banana/generate: ответ без task_id")
+    return await _await_banana_task(session, task_id)
 
 
 async def _download_url(session: aiohttp.ClientSession, url: str, output_path: str) -> None:
@@ -272,12 +343,29 @@ async def banana_generate_with_retry(
             await asyncio.sleep((5, 10, 20)[min(attempt - 1, 2)])
 
 
+def _image_item_to_bytes(item) -> bytes:
+    """Готовая картинка из completed-статуса: data URI (апскейл) либо
+    объект с fifeUrl/url на скачивание."""
+    url = item if isinstance(item, str) else (item.get("fifeUrl") or item.get("url") or "")
+    if url.startswith("data:"):
+        return base64.b64decode(url.split(",", 1)[1])
+    if url:
+        r = requests.get(url, timeout=300)
+        r.raise_for_status()
+        return r.content
+    raise Exception("banana: в ответе нет ни data URI, ни URL картинки")
+
+
 def upscale_image(
     media_id: str,
     project_id: str,
     target_resolution: str = "UPSAMPLE_IMAGE_RESOLUTION_2K",
 ) -> bytes:
-    """Возвращает декодированные bytes JPEG."""
+    """Возвращает декодированные bytes картинки.
+
+    С апдейта Banana апскейл асинхронный: POST отдаёт task_id, результат
+    забираем опросом /video/status/:taskId (images[] с base64 Data URI).
+    """
     payload = {
         "media_id": media_id,
         "project_id": project_id,
@@ -292,7 +380,36 @@ def upscale_image(
     if r.status_code >= 400:
         raise Exception(f"banana/upscale {r.status_code}: {r.text[:300]}")
     data = _check(r.json(), "banana/upscale")
-    return base64.b64decode(data["encodedImage"])
+    if "encodedImage" in data:  # старое синхронное тело — на всякий случай
+        return base64.b64decode(data["encodedImage"])
+    task_id = data.get("task_id")
+    if not task_id:
+        raise Exception("banana/upscale: ответ без task_id")
+
+    deadline = time.time() + IMAGE_TIMEOUT_SEC
+    poll_failures = 0
+    while time.time() < deadline:
+        try:
+            data = get_video_status(task_id)
+            poll_failures = 0
+        except Exception:
+            poll_failures += 1
+            if poll_failures >= MAX_POLL_FAILURES:
+                raise
+            time.sleep(IMAGE_POLL_INTERVAL_SEC)
+            continue
+        status = str(data.get("status", "")).lower()
+        if status == "completed":
+            images = data.get("images") or data.get("media") or []
+            if not images:
+                raise Exception("banana/upscale: completed без images[]")
+            return _image_item_to_bytes(images[0])
+        if status == "failed":
+            raise Exception(f"banana/upscale failed: {data.get('error', 'unknown')}")
+        if status in ("cancelled", "canceled"):
+            raise Exception(f"banana/upscale cancelled: {task_id}")
+        time.sleep(IMAGE_POLL_INTERVAL_SEC)
+    raise TimeoutError(f"Апскейл {task_id} не завершился за {IMAGE_TIMEOUT_SEC}с")
 
 
 # ---------- видео ----------
