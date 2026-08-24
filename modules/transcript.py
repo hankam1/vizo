@@ -16,7 +16,9 @@ class _TimeoutSession(requests.Session):
         return super().request(*args, **kwargs)
 
 
-def extract_video_id(url: str) -> str | None:
+def extract_video_id(url) -> str | None:
+    if not isinstance(url, str) or not url.strip():
+        return None
     patterns = [
         r"(?:v=|/v/|youtu\.be/|/embed/)([^&?/\s]{11})",
         r"^([^&?/\s]{11})$",

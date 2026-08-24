@@ -534,6 +534,17 @@ def validate(scenario: dict) -> list:
                 "step_index": idx,
                 "message": "Не указан источник — переменная с оригиналом для нарезки",
             })
+        # Шагам YouTube нужна ссылка: явный inputs.url, переменная {url} или
+        # шаг «YouTube URL» раньше по цепочке. Иначе в рантайме ловили None.
+        if t in ("yt_title", "yt_desc", "yt_transcript", "yt_preview"):
+            explicit = (step.get("inputs") or {}).get("url")
+            has_url_step = any(s.get("type") == "yt_url" for s in steps[:idx])
+            if not explicit and "url" not in declared_vars and not has_url_step:
+                errors.append({
+                    "step_index": idx,
+                    "message": "Перед этим шагом нужен шаг «YouTube URL» — "
+                               "иначе неоткуда взять ссылку на видео",
+                })
 
     return errors
 
@@ -872,7 +883,7 @@ class ScenarioRunner:
 
         elif t == "yt_title":
             from modules.transcript import get_title
-            url = self._resolve(step.get("inputs", {}).get("url")) or self.vars.get("url")
+            url = self._resolve_video_url(idx, step)
             self.on_progress(idx, self._total_steps,
                              step.get("name") or "Заголовок", "Запрос к YouTube…")
             log.info("yt_title: fetching for %s", url)
@@ -893,7 +904,7 @@ class ScenarioRunner:
 
         elif t == "yt_desc":
             from modules.transcript import get_description
-            url = self._resolve(step.get("inputs", {}).get("url")) or self.vars.get("url")
+            url = self._resolve_video_url(idx, step)
             self.on_progress(idx, self._total_steps,
                              step.get("name") or "Описание", "Запрос к YouTube…")
             log.info("yt_desc: fetching for %s", url)
@@ -914,7 +925,7 @@ class ScenarioRunner:
 
         elif t == "yt_transcript":
             from modules.transcript import get_transcript
-            url = self._resolve(step.get("inputs", {}).get("url")) or self.vars.get("url")
+            url = self._resolve_video_url(idx, step)
             self.on_progress(idx, self._total_steps,
                              step.get("name") or "Транскрипт",
                              "Запрашиваю транскрипт у YouTube…")
@@ -937,7 +948,7 @@ class ScenarioRunner:
 
         elif t == "yt_preview":
             from modules.transcript import download_thumbnail
-            url = self._resolve(step.get("inputs", {}).get("url")) or self.vars.get("url")
+            url = self._resolve_video_url(idx, step)
             path = os.path.join(self.output_dir, step.get("filename") or "thumbnail.jpg")
             self.on_progress(idx, self._total_steps,
                              step.get("name") or "Превью", "Скачивание превью…")
@@ -1693,6 +1704,41 @@ class ScenarioRunner:
                 return self.vars[src]
             return src
         return substitute(src or "", self.vars)
+
+    # Названия шагов YouTube для человекочитаемых ошибок.
+    _YT_STEP_LABELS = {
+        "yt_title": "Заголовок", "yt_desc": "Описание",
+        "yt_transcript": "Транскрипт", "yt_preview": "Превью",
+    }
+
+    def _resolve_video_url(self, idx: int, step: dict) -> str:
+        """Ссылка на видео для шагов yt_title/yt_desc/yt_transcript/yt_preview.
+
+        Порядок: явный `inputs.url` шага → переменная `url` → выход ближайшего
+        предыдущего шага «YouTube URL» (его переменную могли переименовать,
+        например в `url_2`, если шаг добавили не первым). Раньше при отсутствии
+        `url` в функции YouTube улетал None и сценарий падал с бессмысленным
+        «'NoneType' object has no attribute 'strip'»."""
+        url = self._resolve((step.get("inputs") or {}).get("url"))
+        if not isinstance(url, str) or not url.strip() or "{" in url:
+            url = self.vars.get("url")
+        if not isinstance(url, str) or not url.strip():
+            url = None
+            steps = self.scenario.get("steps", [])
+            for prev in reversed(steps[:idx]):
+                if prev.get("type") == "yt_url":
+                    cand = self.vars.get(prev.get("output") or "url")
+                    if isinstance(cand, str) and cand.strip():
+                        url = cand
+                        break
+        if not url:
+            label = step.get("name") or self._YT_STEP_LABELS.get(step.get("type"), step.get("type"))
+            raise RuntimeError(
+                f"Шаг «{label}» не нашёл ссылку на видео. Перед ним должен стоять шаг "
+                "«YouTube URL» (его переменная — обычно {url}); проверь, что он есть в "
+                "сценарии и не пропущен."
+            )
+        return url.strip()
 
     def _set_output(self, step: dict, value):
         out = step.get("output")

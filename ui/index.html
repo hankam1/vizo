@@ -4946,6 +4946,10 @@ function addStep(key, label, tone) {
   renderChain();
 }
 
+// Имя выходной переменной для нового шага. Раньше индексом служил номер шага в
+// цепочке: шаг «YouTube URL», добавленный не первым, получал `url_2`, а шаги
+// Транскрипт/Заголовок/Описание/Превью ищут именно {url} — сценарий падал.
+// Теперь базовое имя берётся, если оно свободно, иначе — первый свободный суффикс.
 function defaultOutputName(type, idx) {
   const base = {
     yt_url: 'url', yt_transcript: 'transcript', yt_title: 'title',
@@ -4958,7 +4962,12 @@ function defaultOutputName(type, idx) {
     video_t2v: 'videos', video_i2v: 'videos', video_batch: 'videos',
   }[type];
   if (!base) return '';
-  return idx > 0 ? base + '_' + (idx + 1) : base;
+  const taken = new Set(((editingScenario && editingScenario.steps) || []).map(st => st.output).filter(Boolean));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const cand = base + '_' + n;
+    if (!taken.has(cand)) return cand;
+  }
 }
 
 function renderChain() {
