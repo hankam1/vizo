@@ -2298,20 +2298,33 @@ class Api:
         self._progress("Скачиваю...", 80, 1)
         os.makedirs(out_dir, exist_ok=True)
         import aiohttp
+        import base64 as _b64
+        saved = 0
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(media, 1):
-                fife_url = item.get("fifeUrl") or item.get("url")
+                fife_url = veo_api.image_item_url(item)
                 if not fife_url:
                     continue
                 out_path = os.path.join(out_dir, f"image_{i:03d}.png")
-                async with session.get(fife_url) as r:
-                    r.raise_for_status()
-                    content = await r.read()
+                if fife_url.startswith("data:"):
+                    content = _b64.b64decode(fife_url.split(",", 1)[1])
+                else:
+                    async with session.get(fife_url) as r:
+                        r.raise_for_status()
+                        content = await r.read()
                 # Атомарно: обрыв скачивания не должен оставить битый PNG.
                 tmp = out_path + ".tmp"
                 with open(tmp, "wb") as f:
                     f.write(content)
                 os.replace(tmp, out_path)
+                saved += 1
+        # Ни одной ссылки в ответе — это ошибка, а не «готово»: иначе панель
+        # рапортует успех и открывает пустую папку.
+        if not saved:
+            raise RuntimeError(
+                f"В ответе VeoNonStop {len(media)} элемент(ов), но ни в одном "
+                "нет ссылки на картинку"
+            )
         self._progress("Готово!", 100, 2)
 
     async def _gen_video(self, out_dir: str, params: dict, mode: str, loop):

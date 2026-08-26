@@ -19,6 +19,9 @@ import requests
 
 from config import VEO_BASE
 from modules import settings
+from modules.logger import get as get_logger
+
+log = get_logger("vizo.veo")
 
 
 # ---------- общие константы ----------
@@ -28,11 +31,23 @@ DEFAULT_IMAGE_ASPECT = "16:9"
 VIDEO_POLL_INTERVAL_SEC = 10
 VIDEO_TIMEOUT_SEC = 1800  # 30 минут — лимит сервиса
 IMAGE_POLL_INTERVAL_SEC = 10  # рекомендация дока: опрос каждые 10с
-IMAGE_TIMEOUT_SEC = 900  # типичная генерация 1–3 мин, берём с запасом
+# Типичная генерация 1–3 мин, но при занятых слотах задача может долго висеть
+# в queued — берём тот же потолок, что и у видео (лимит сервиса 30 минут).
+IMAGE_TIMEOUT_SEC = 1800
 # Сколько подряд неудачных опросов статуса терпим. VeoNonStop при сбоях своей
 # инфраструктуры отдаёт 503 ("API key validation service unavailable")
 # по несколько минут — оплаченный рендер из-за этого убивать нельзя.
 MAX_POLL_FAILURES = 20
+
+
+class BananaNoImages(Exception):
+    """Задача Banana завершилась, но картинок в ответе нет.
+
+    Отдельный класс, а не просто текст: ретраить такое бессмысленно (обычно
+    это значит, что сервис снова сменил формат ответа), а молча считать
+    промпт готовым — тем более. Оба места, решающие «повторять или нет»,
+    смотрят на тип исключения.
+    """
 
 
 def _headers() -> dict:
@@ -79,12 +94,41 @@ def get_concurrency_limit(default: int = 4) -> int:
 
 # ---------- картинки (Banana) ----------
 
+# Ключи, под которыми completed-ответ может отдать готовые картинки. Дока
+# обещает 'images', но сервис уже менял форму ответа (раньше был синхронный
+# 'media'), поэтому перебираем все известные варианты — иначе смена ключа
+# снова превратится в «промпты отправлены, файлов ноль».
+_IMAGE_RESULT_KEYS = ("images", "media", "videos", "results", "output", "files")
+# Поля элемента, в которых может лежать ссылка (или data URI) на картинку.
+_IMAGE_URL_KEYS = ("fifeUrl", "url", "imageUrl", "image_url", "signedUrl",
+                   "downloadUrl", "dataUri", "data_uri", "servingBaseUri")
+
+
+def image_item_url(item) -> str:
+    """Ссылка (http) или data URI готовой картинки из элемента ответа.
+    Пустая строка, если ссылки нет — вызывающий код обязан это заметить."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        for k in _IMAGE_URL_KEYS:
+            v = item.get(k)
+            if isinstance(v, str) and v:
+                return v
+    return ""
+
+
 def _norm_image_result(data: dict) -> dict:
     """Completed-ответ статуса кладёт картинки в 'images'; исторически весь
     остальной код (scenarios._save_banana, api_bridge) читает 'media' —
     дублируем под старым именем, чтобы не трогать потребителей."""
     if not data.get("media"):
-        data["media"] = data.get("images") or []
+        for key in _IMAGE_RESULT_KEYS:
+            items = data.get(key)
+            if isinstance(items, list) and any(image_item_url(i) for i in items):
+                data["media"] = items
+                break
+    if not data.get("media"):
+        data["media"] = []
     return data
 
 
@@ -100,6 +144,7 @@ async def _await_banana_task(
     чтобы не жечь кредиты."""
     deadline = time.time() + timeout
     poll_failures = 0
+    last_status = None
     try:
         while time.time() < deadline:
             try:
@@ -121,8 +166,21 @@ async def _await_banana_task(
                 await asyncio.sleep(IMAGE_POLL_INTERVAL_SEC)
                 continue
             status = str(data.get("status", "")).lower()
+            if status != last_status:
+                log.info("banana %s: %s", task_id, status or "(без статуса)")
+                last_status = status
             if status == "completed":
-                return _norm_image_result(data)
+                result = _norm_image_result(data)
+                if not result.get("media"):
+                    # Задача завершилась, но картинок в ответе нет. Раньше это
+                    # молча превращалось в «промпт готов, файлов ноль» —
+                    # теперь падаем с понятной ошибкой и списком ключей ответа,
+                    # чтобы смену формата было видно сразу.
+                    raise BananaNoImages(
+                        f"banana: задача {task_id} завершена, но в ответе нет "
+                        f"картинок (ключи: {sorted(data.keys())})"
+                    )
+                return result
             if status == "failed":
                 raise Exception(f"banana failed: {data.get('error', 'unknown')}")
             if status in ("cancelled", "canceled"):
@@ -172,18 +230,28 @@ async def _banana_post(
     # С апдейта Banana генерация асинхронная: сразу приходит только task_id,
     # картинки забираем опросом статуса. Ответ со старым синхронным телом
     # (media[] без task_id) на всякий случай тоже принимаем.
-    if data.get("media") or data.get("images"):
-        return _norm_image_result(data)
-    task_id = data.get("task_id")
+    sync = _norm_image_result(dict(data))
+    if sync.get("media"):
+        return sync
+    task_id = data.get("task_id") or data.get("taskId") or data.get("id")
     if not task_id:
-        raise Exception("banana/generate: ответ без task_id")
+        raise Exception(
+            "banana/generate: в ответе нет ни task_id, ни картинок "
+            f"(ключи: {sorted(data.keys())})"
+        )
+    log.info("banana/generate: задача %s принята", task_id)
     return await _await_banana_task(session, task_id)
 
 
 async def _download_url(session: aiohttp.ClientSession, url: str, output_path: str) -> None:
-    async with session.get(url) as r:
-        r.raise_for_status()
-        content = await r.read()
+    # Апскейл (а иногда и generate) отдаёт картинку прямо в ответе как data URI —
+    # качать по сети нечего, декодируем на месте.
+    if url.startswith("data:"):
+        content = base64.b64decode(url.split(",", 1)[1])
+    else:
+        async with session.get(url) as r:
+            r.raise_for_status()
+            content = await r.read()
     # Атомарно: оборванное скачивание не должно оставить частичный файл,
     # который потом будет принят за готовый (skip-existing при повторе).
     tmp = output_path + ".tmp"
@@ -218,9 +286,10 @@ async def _generate_one_image(
                     project_id=None,
                 )
                 media = data.get("media") or []
-                if not media:
-                    raise RuntimeError("пустой media[]")
-                await _download_url(session, media[0]["fifeUrl"], output_path)
+                url = image_item_url(media[0]) if media else ""
+                if not url:
+                    raise RuntimeError("в ответе нет ссылки на картинку")
+                await _download_url(session, url, output_path)
                 print(f"  [{index}/{total}] ✓ {os.path.basename(output_path)}")
                 return
             except Exception as e:
@@ -303,6 +372,8 @@ _PERMANENT_MARKERS = (
 
 
 def _is_permanent_error(err: Exception) -> bool:
+    if isinstance(err, BananaNoImages):
+        return True
     msg = str(err)
     return any(m in msg for m in _PERMANENT_MARKERS)
 
@@ -346,7 +417,7 @@ async def banana_generate_with_retry(
 def _image_item_to_bytes(item) -> bytes:
     """Готовая картинка из completed-статуса: data URI (апскейл) либо
     объект с fifeUrl/url на скачивание."""
-    url = item if isinstance(item, str) else (item.get("fifeUrl") or item.get("url") or "")
+    url = image_item_url(item)
     if url.startswith("data:"):
         return base64.b64decode(url.split(",", 1)[1])
     if url:
@@ -382,9 +453,12 @@ def upscale_image(
     data = _check(r.json(), "banana/upscale")
     if "encodedImage" in data:  # старое синхронное тело — на всякий случай
         return base64.b64decode(data["encodedImage"])
-    task_id = data.get("task_id")
+    task_id = data.get("task_id") or data.get("taskId") or data.get("id")
     if not task_id:
-        raise Exception("banana/upscale: ответ без task_id")
+        raise Exception(
+            "banana/upscale: в ответе нет task_id "
+            f"(ключи: {sorted(data.keys())})"
+        )
 
     deadline = time.time() + IMAGE_TIMEOUT_SEC
     poll_failures = 0
@@ -400,9 +474,12 @@ def upscale_image(
             continue
         status = str(data.get("status", "")).lower()
         if status == "completed":
-            images = data.get("images") or data.get("media") or []
+            images = _norm_image_result(data).get("media") or []
             if not images:
-                raise Exception("banana/upscale: completed без images[]")
+                raise Exception(
+                    "banana/upscale: задача завершена, но картинок в ответе нет "
+                    f"(ключи: {sorted(data.keys())})"
+                )
             return _image_item_to_bytes(images[0])
         if status == "failed":
             raise Exception(f"banana/upscale failed: {data.get('error', 'unknown')}")

@@ -1289,7 +1289,11 @@ class ScenarioRunner:
 
             def _is_permanent(err: Exception) -> bool:
                 """Google's INVALID_ARGUMENT / safety-filter rejects never
-                succeed on retry — recognising them stops infinite loops."""
+                succeed on retry — recognising them stops infinite loops.
+                Сюда же ответ без картинок: если сервис сменил формат, вечный
+                ретрай просто крутится час и не даёт ни файлов, ни ошибки."""
+                if isinstance(err, veo_api.BananaNoImages):
+                    return True
                 msg = str(err)
                 markers = ("INVALID_ARGUMENT", "BAD_REQUEST", "safety",
                            "SAFETY", "blocked", "PROHIBITED")
@@ -1844,21 +1848,38 @@ class ScenarioRunner:
             await self._close_ai(provider)
 
     async def _save_banana(self, data: dict, prefix: str = "image") -> list:
+        """Скачать картинки из ответа Banana. Пустой результат — ОШИБКА.
+
+        Раньше метод молча возвращал [] когда в ответе не было ни одной
+        ссылки (сервис перешёл на асинхронный API и стал отдавать только
+        task_id). Шаг при этом считал промпт выполненным: прогресс доходил
+        до «100/100 готово», а в папке не появлялось ни одного файла.
+        Теперь такой ответ поднимает ошибку — её увидит и ретрай, и UI."""
         import aiohttp
+        import base64
+        from modules import veo_api
         media = data.get("media") or []
+        if not media:
+            raise RuntimeError(
+                "VeoNonStop вернул ответ без картинок "
+                f"(ключи ответа: {sorted(data.keys())})"
+            )
         paths = []
         images_dir = os.path.join(self.output_dir, "images")
         os.makedirs(images_dir, exist_ok=True)
         existing = len([f for f in os.listdir(images_dir) if f.startswith(prefix)])
         async with aiohttp.ClientSession() as session:
             for i, item in enumerate(media, 1):
-                url = item.get("fifeUrl") or item.get("url")
+                url = veo_api.image_item_url(item)
                 if not url:
                     continue
                 path = os.path.join(images_dir, f"{prefix}_{existing + i:03d}.png")
-                async with session.get(url) as r:
-                    r.raise_for_status()
-                    content = await r.read()
+                if url.startswith("data:"):
+                    content = base64.b64decode(url.split(",", 1)[1])
+                else:
+                    async with session.get(url) as r:
+                        r.raise_for_status()
+                        content = await r.read()
                 # Атомарно: оборванное скачивание не должно оставить битый PNG,
                 # который при повторном запуске посчитается готовым.
                 tmp = path + ".tmp"
@@ -1866,6 +1887,11 @@ class ScenarioRunner:
                     f.write(content)
                 os.replace(tmp, path)
                 paths.append(path)
+        if not paths:
+            raise RuntimeError(
+                f"В ответе VeoNonStop {len(media)} элемент(ов), но ни в одном "
+                "нет ссылки на картинку"
+            )
         return paths
 
     async def _fetch_video(self, task_id: str, label: str = "Видео",
