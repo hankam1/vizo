@@ -49,6 +49,10 @@ class ClaudeAutomation:
         self._browser = None
         self._context = None
         self.page = None
+        # Последняя прочитанная подпись селектора моделей (aria-label или
+        # текст кнопки). Сценарий подставляет её в текст ошибки — без этого
+        # «не удалось переключить модель» невозможно диагностировать удалённо.
+        self.last_model_state = ""
 
     # ------------------------------------------------------------------
     # Startup / shutdown
@@ -197,10 +201,45 @@ class ClaudeAutomation:
     # мапился на Sonnet 5. Fable 5 намеренно НЕ поддерживаем: это промо-пункт,
     # может пропасть из меню и сценарии с ним начали бы падать.
     SUPPORTED_MODELS = ["Opus 5", "Sonnet 5", "Haiku 4.5"]
+    # Имена, которые может показать кнопка селектора. Нужны только для ЧТЕНИЯ
+    # текущего состояния — переключаться умеем лишь на SUPPORTED_MODELS.
+    # Старые имена оставлены, чтобы распознать не обновившийся пикер.
+    KNOWN_MODEL_NAMES = ["Opus 5", "Sonnet 5", "Haiku 4.5", "Fable 5",
+                         "Opus 4.8", "Opus 4.7", "Sonnet 4.6", "Sonnet 4.5"]
     # Effort keys (data-testid suffixes) → отображаемый текст в подменю.
     # xhigh ("Extra") есть у Opus 5 и Sonnet 5. У Haiku effort
     # не настраивается вовсе (нет effort-menu-trigger).
     EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
+
+    # Кнопка-селектор моделей. claude.ai регулярно переименовывает data-testid
+    # и меняет формат aria-label, поэтому идём по списку кандидатов, а не по
+    # одному «единственно верному» селектору: раньше пропажа
+    # model-selector-dropdown роняла ВЕСЬ сценарий на этапе переключения.
+    MODEL_BUTTON_SELECTORS = [
+        '[data-testid="model-selector-dropdown"]',
+        '[data-testid*="model-selector"]',
+        '[data-testid*="model-picker"]',
+        'button[aria-label^="Model"]',
+        'button[aria-haspopup="menu"][aria-label*="odel"]',
+    ]
+    # Пункт меню с моделью — тоже несколько вариантов разметки.
+    _MODEL_OPTION_TEMPLATES = [
+        '[role="menuitemradio"]:has-text("{name}")',
+        '[data-testid^="model-option"]:has-text("{name}")',
+        '[role="menuitem"]:has-text("{name}")',
+        '[role="option"]:has-text("{name}")',
+        '[role="menu"] button:has-text("{name}")',
+    ]
+    # Пункт «Effort», раскрывающий подменю уровней.
+    _EFFORT_TRIGGER_SELECTORS = [
+        '[data-testid="effort-menu-trigger"]',
+        '[data-testid*="effort"][aria-haspopup]',
+        '[role="menuitem"][aria-haspopup]:has-text("Effort")',
+        '[role="menuitem"]:has-text("Effort")',
+        '[role="menuitem"]:has-text("Reasoning")',
+    ]
+    _EFFORT_KEY_TO_LABEL = {"low": "Low", "medium": "Medium", "high": "High",
+                            "xhigh": "Extra", "max": "Max"}
 
     async def set_model_and_effort(self, model_name: str | None,
                                     effort: str | None = None) -> bool:
@@ -244,17 +283,22 @@ class ClaudeAutomation:
 
         # 0b. Открыть меню моделей — это заставляет DOM подтвердить свежее
         # состояние (после new_chat() aria-label иногда отстаёт пока меню
-        # не было открыто). Затем читаем актуальный aria-label кнопки.
-        # На странице ровно один [data-testid="model-selector-dropdown"]
-        # (проверено dom-dump'ом), его aria-label достоверный источник
-        # вида "Model: Sonnet 5 Medium".
+        # не было открыто). Затем читаем актуальное состояние: сначала по
+        # кнопке-селектору, при неудаче — по aria-checked в самом меню.
         if not await self._open_model_menu():
+            await self._dump_model_ui_debug("меню моделей не открылось")
             return False
         await asyncio.sleep(0.3)  # дать DOM настояться после открытия
         current_label = await self._current_model_label()
-        cur_model, cur_effort = self._parse_model_label(current_label or "")
+        cur_model, cur_effort = await self._read_current(current_label)
+        self.last_model_state = current_label or ""
         log.info("set_model_and_effort: цель=%s/%s, текущее=%s (model=%s, effort=%s)",
                  model_name, level, current_label, cur_model, cur_effort)
+        if cur_model is None:
+            # Разметка сменилась — дальше кликаем «вслепую», поэтому сразу
+            # кладём в лог слепок кнопки/меню: следующая поломка станет
+            # диагностируемой без повторного воспроизведения у пользователя.
+            await self._dump_model_ui_debug("состояние селектора не читается")
 
         need_model = bool(model_name) and (cur_model != model_name)
         # При смене модели claude.ai сбрасывает effort на дефолт новой
@@ -270,29 +314,36 @@ class ClaudeAutomation:
         # 2. Сменить модель (если нужно). Клик закрывает меню; верифицируем
         # через aria-label (источник правды, см. dom-dump). Ретраим до 3 раз
         # на случай если клик не дошёл до base-ui сразу после гидрации /new.
+        # model_clicked — «клик по пункту прошёл, но состояние прочитать
+        # нечем»: на такой случай доверяем клику, иначе сценарий падает
+        # из-за одной лишь смены разметки.
         model_ok = True
+        model_clicked = not need_model
         if need_model:
             switched = False
             for attempt in range(3):
                 # Меню должно быть открыто перед попыткой клика.
-                if await self.page.locator('[role="menu"]').count() == 0:
+                if not await self._menu_open():
                     if not await self._open_model_menu():
                         await asyncio.sleep(0.5)
                         continue
-                try:
-                    option = self.page.locator(
-                        f'[role="menuitemradio"]:has-text("{model_name}")'
-                    ).first
-                    await option.click(timeout=5_000)
+                clicked = await self._click_model_option(model_name)
+                if clicked:
+                    model_clicked = True
                     await _human_pause(0.6, 1.1)
-                except Exception as e:
-                    log.info("Клик по модели '%s' (попытка %d) упал: %s",
-                             model_name, attempt + 1, e)
+                else:
+                    log.info("Пункт меню с моделью '%s' не найден (попытка %d)",
+                             model_name, attempt + 1)
                 cur_label_now = await self._current_model_label()
                 cur_now, _ = self._parse_model_label(cur_label_now or "")
                 if cur_now == model_name:
                     log.info("Модель переключена на '%s' (попытка %d)",
                              model_name, attempt + 1)
+                    switched = True
+                    break
+                if cur_now is None and clicked:
+                    log.info("Модель кликнута, но состояние не читается "
+                             "(label=%r) — считаю применённым", cur_label_now)
                     switched = True
                     break
                 log.info("Модель не переключилась (aria-label='%s', нужно '%s') "
@@ -302,27 +353,26 @@ class ClaudeAutomation:
             if not switched:
                 log.warning("Не смог переключить модель на '%s' после 3 попыток",
                             model_name)
+                await self._dump_model_ui_debug(
+                    f"модель '{model_name}' не переключилась")
                 model_ok = False
 
         # 3. Effort. ВАЖНО (из dom-dump): `[data-testid="effort-menu-trigger"]`
         # на странице ВСЕГДА один и принадлежит только активной модели (для
         # Haiku его нет вообще). Поэтому скоупа по модели не нужно — нужно
         # лишь убедиться что активна нужная модель и меню открыто.
+        applied = not need_effort
+        effort_clicked = False
         if need_effort:
             applied = False
             for attempt in range(3):
-                if await self.page.locator('[role="menu"]').count() == 0:
+                if not await self._menu_open():
                     if not await self._open_model_menu():
                         await asyncio.sleep(0.5)
                         continue
-                # Дать DOM настояться чтобы effort-menu-trigger успел появиться.
-                trigger = self.page.locator('[data-testid="effort-menu-trigger"]').first
-                try:
-                    await trigger.wait_for(state="visible", timeout=2_500)
-                except Exception:
-                    pass
-                if await trigger.count() == 0:
-                    log.info("effort-menu-trigger отсутствует — видимо Haiku "
+                trigger = await self._find_effort_trigger()
+                if trigger is None:
+                    log.info("Пункт Effort отсутствует — видимо Haiku "
                              "(effort не настраивается)")
                     break
                 try:
@@ -331,12 +381,12 @@ class ClaudeAutomation:
                 except Exception as e:
                     log.info("effort-trigger click (попытка %d) упал: %s",
                              attempt + 1, e)
-                opt = self.page.locator(
-                    f'[data-testid="effort-option-{level}"]'
-                ).first
-                if await opt.count() == 0:
-                    log.warning("effort-option-%s не существует для текущей модели "
-                                "(возможно, модель не поддерживает этот effort)", level)
+                opt = await self._find_effort_option(level)
+                if opt is None:
+                    log.warning("Уровень effort '%s' не найден в подменю "
+                                "(возможно, модель его не поддерживает)", level)
+                    await self._dump_model_ui_debug(
+                        f"effort '{level}' не найден в подменю")
                     break
                 already_checked = False
                 try:
@@ -351,6 +401,7 @@ class ClaudeAutomation:
                     break
                 try:
                     await opt.click(timeout=4_000)
+                    effort_clicked = True
                     await _human_pause(0.4, 0.9)
                 except Exception as e:
                     log.info("effort-option-%s click (попытка %d) упал: %s",
@@ -363,6 +414,11 @@ class ClaudeAutomation:
                              level, attempt + 1)
                     applied = True
                     break
+                if cur_eff_now is None and effort_clicked:
+                    log.info("Effort кликнут, но состояние не читается "
+                             "(label=%r) — считаю применённым", cur_label_now)
+                    applied = True
+                    break
                 log.info("Effort не применился (aria-label='%s', нужно='%s') "
                          "— попытка %d/3",
                          cur_label_now, level, attempt + 1)
@@ -373,16 +429,28 @@ class ClaudeAutomation:
         # 4. Закрыть меню и прочитать финальный aria-label.
         await self._close_menus()
         final_label = await self._current_model_label()
+        self.last_model_state = final_label or ""
         final_model, final_effort = self._parse_model_label(final_label or "")
         log.info("Final state: %s (model=%s, effort=%s)",
                  final_label, final_model, final_effort)
 
-        model_ok = (not model_name) or (final_model == model_name)
+        # Финальная проверка не должна быть строже, чем позволяет разметка:
+        # если состояние прочитать нечем (claude.ai сменил aria-label или
+        # data-testid кнопки), опираемся на то, что клики по пунктам прошли.
+        # Раньше нечитаемый label гарантированно валил шаг, даже когда модель
+        # и effort уже стояли правильные.
+        model_ok = (not model_name) or (final_model == model_name) or (
+            final_model is None and model_ok and model_clicked
+        )
         # У Haiku в aria-label стоит "Extended" (не один из наших EFFORT_LEVELS).
         # Это нормально — Haiku не настраивается, считаем что effort применён.
         effort_ok = (not level) or (final_effort == level) or (
-            final_effort is None and "Haiku" in (final_model or "")
+            final_effort is None and ("Haiku" in (final_model or "") or applied)
         )
+        if final_model is None:
+            log.warning("Состояние селектора моделей нечитаемо (label=%r) — "
+                        "доверяю результату кликов: model_ok=%s, effort_ok=%s",
+                        final_label, model_ok, effort_ok)
         return model_ok and effort_ok
 
     async def _close_menus(self):
@@ -399,35 +467,207 @@ class ClaudeAutomation:
         return await self.set_model_and_effort(model_name, None)
 
     async def _current_model_label(self) -> str | None:
-        """Текущее значение aria-label кнопки селектора моделей.
-        Пример: 'Model: Opus 5 High'. None если кнопка не найдена.
-        На странице ровно один такой элемент (проверено dom-dump'ом)."""
-        try:
-            return await self.page.locator(
-                '[data-testid="model-selector-dropdown"]'
-            ).first.get_attribute("aria-label", timeout=3_000)
-        except Exception:
-            return None
+        """Строка, описывающая текущую модель/effort у кнопки-селектора.
+
+        Обычно это aria-label вида 'Model: Opus 5 High'. Если claude.ai его
+        убрал/переименовал — берём видимый текст кнопки, а саму кнопку ищем
+        по списку кандидатов (MODEL_BUTTON_SELECTORS). None, если кнопку
+        вообще не нашли."""
+        script = """
+            () => {
+                const sels = %s;
+                for (const s of sels) {
+                    let els = [];
+                    try { els = document.querySelectorAll(s); } catch (e) { continue; }
+                    for (const el of els) {
+                        const aria = (el.getAttribute('aria-label') || '').trim();
+                        if (aria) return aria;
+                        const txt = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+                        if (txt) return txt;
+                    }
+                }
+                return '';
+            }
+        """ % json.dumps(self.MODEL_BUTTON_SELECTORS)
+        label = await self._safe_eval(script, default="")
+        return label or None
+
+    async def _read_current(self, label: str | None = None
+                            ) -> tuple[str | None, str | None]:
+        """Текущие (модель, effort). Сначала кнопка-селектор, затем — то, что
+        видно в ОТКРЫТОМ меню (aria-checked у пунктов, текст пункта Effort)."""
+        if label is None:
+            label = await self._current_model_label()
+        model, eff = self._parse_model_label(label or "")
+        if model is None or eff is None:
+            m2, e2 = await self._read_state_from_menu()
+            model = model or m2
+            eff = eff or e2
+        return model, eff
+
+    async def _read_state_from_menu(self) -> tuple[str | None, str | None]:
+        """Прочитать модель/effort из открытого меню: отмеченный
+        `aria-checked` пункт модели и подпись пункта Effort. Запасной путь на
+        случай, когда кнопка-селектор перестала отдавать понятный label."""
+        data = await self._safe_eval(
+            """
+            () => {
+                const out = {model: '', effort: ''};
+                const checked = document.querySelectorAll(
+                    '[role="menuitemradio"][aria-checked="true"],'
+                    + '[role="option"][aria-selected="true"]');
+                for (const el of checked) {
+                    const tid = el.getAttribute('data-testid') || '';
+                    const m = tid.match(/effort-option-(.+)$/);
+                    if (m) { if (!out.effort) out.effort = m[1]; continue; }
+                    if (!out.model)
+                        out.model = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+                }
+                const trig = document.querySelector('[data-testid="effort-menu-trigger"]')
+                    || document.querySelector('[data-testid*="effort"][aria-haspopup]');
+                if (trig && !out.effort)
+                    out.effort = (trig.innerText || '').replace(/\\s+/g, ' ').trim();
+                return out;
+            }
+            """, default=None)
+        if not isinstance(data, dict):
+            return None, None
+        model, _ = self._parse_model_label(data.get("model") or "")
+        raw_eff = (data.get("effort") or "").strip()
+        eff = raw_eff.lower() if raw_eff.lower() in self.EFFORT_LEVELS else None
+        if eff is None and raw_eff:
+            _, eff = self._parse_model_label("Model: X " + raw_eff)
+        return model, eff
 
     # Текстовая метка effort в aria-label → ключ в data-testid.
     # "Extended" — единственный режим Haiku, в нашем EFFORT_LEVELS его нет
     # (он не настраивается, поэтому return None и считаем «совпадает с любым»).
     _EFFORT_LABEL_TO_KEY = {
         "low": "low", "medium": "medium", "high": "high",
-        "extra": "xhigh", "max": "max",
+        "extra": "xhigh", "extra high": "xhigh", "xhigh": "xhigh",
+        "max": "max", "maximum": "max",
     }
+    # Порядок важен: составные метки проверяем раньше их частей, иначе
+    # "Extra High" схлопнулось бы в "high", а "Maximum" — в "max".
+    _EFFORT_MATCH_ORDER = ["extra high", "maximum", "medium", "extra",
+                           "xhigh", "high", "low", "max"]
 
     def _parse_model_label(self, label: str) -> tuple[str | None, str | None]:
-        """'Model: Opus 5 High' → ('Opus 5', 'high')"""
-        if not label or not label.lower().startswith("model:"):
+        """'Model: Opus 5 High' → ('Opus 5', 'high').
+
+        Формат метки claude.ai меняет без предупреждения (а без aria-label
+        сюда приходит просто текст кнопки), поэтому не режем строку по
+        позициям, а ищем известные имена моделей и слова effort в любом её
+        месте. Не нашли — (None, None), и вызывающий код это переживает."""
+        if not label:
             return None, None
-        rest = label.split(":", 1)[1].strip()
-        # Последнее слово label — это эффорт (Low/Medium/High/Extra/Max/Extended).
-        parts = rest.rsplit(" ", 1)
-        if len(parts) != 2:
-            return rest, None
-        model, effort_label = parts
-        return model.strip(), self._EFFORT_LABEL_TO_KEY.get(effort_label.strip().lower())
+        low = re.sub(r"\s+", " ", label).lower()
+        model = None
+        for name in self.KNOWN_MODEL_NAMES:
+            if name.lower() in low:
+                model = name
+                break
+        eff = None
+        for word in self._EFFORT_MATCH_ORDER:
+            if re.search(r"\b" + re.escape(word) + r"\b", low):
+                eff = self._EFFORT_LABEL_TO_KEY[word]
+                break
+        return model, eff
+
+    async def _menu_open(self) -> bool:
+        """Открыт ли выпадающий список моделей. Роль контейнера claude.ai
+        менял (menu → listbox), поэтому проверяем и по пунктам меню."""
+        return bool(await self._safe_eval(
+            """() => !!document.querySelector(
+                 '[role="menu"], [role="listbox"], [role="menuitemradio"],'
+                 + '[data-testid^="model-option"],'
+                 + '[data-testid="effort-menu-trigger"]')""",
+            default=False))
+
+    async def _click_model_option(self, model_name: str) -> bool:
+        """Кликнуть пункт меню с моделью, перебирая варианты разметки."""
+        for tmpl in self._MODEL_OPTION_TEMPLATES:
+            sel = tmpl.format(name=model_name)
+            try:
+                loc = self.page.locator(sel).first
+                if await loc.count() == 0:
+                    continue
+                await loc.click(timeout=4_000)
+                return True
+            except Exception as e:
+                log.info("Клик по '%s' не прошёл: %s", sel, e)
+        return False
+
+    async def _find_effort_trigger(self):
+        """Локатор пункта, раскрывающего подменю effort, или None."""
+        for sel in self._EFFORT_TRIGGER_SELECTORS:
+            try:
+                loc = self.page.locator(sel).first
+                if await loc.count() == 0:
+                    continue
+                try:
+                    await loc.wait_for(state="visible", timeout=2_000)
+                except Exception:
+                    pass
+                return loc
+            except Exception:
+                continue
+        return None
+
+    async def _find_effort_option(self, level: str):
+        """Локатор пункта конкретного уровня effort, или None.
+        Сначала по data-testid, потом по точному тексту пункта — иначе
+        подстрочный поиск «High» поймал бы ещё и «Extra High»."""
+        try:
+            loc = self.page.locator(f'[data-testid="effort-option-{level}"]').first
+            if await loc.count() > 0:
+                return loc
+        except Exception:
+            pass
+        label = self._EFFORT_KEY_TO_LABEL.get(level)
+        if not label:
+            return None
+        for role in ("menuitemradio", "menuitem", "option"):
+            try:
+                loc = self.page.get_by_role(role, name=label, exact=True).first
+                if await loc.count() > 0:
+                    return loc
+            except Exception:
+                continue
+        return None
+
+    async def _dump_model_ui_debug(self, why: str):
+        """Слепок разметки селектора моделей в лог. Нужен, чтобы поломку от
+        очередного редизайна claude.ai можно было чинить по логу пользователя,
+        не воспроизводя её у себя."""
+        try:
+            info = await self._safe_eval(
+                """
+                () => {
+                    const out = [];
+                    const seen = new Set();
+                    const push = (el) => {
+                        if (!el || seen.has(el)) return;
+                        seen.add(el);
+                        out.push({
+                            tag: el.tagName,
+                            testid: el.getAttribute('data-testid') || '',
+                            aria: el.getAttribute('aria-label') || '',
+                            role: el.getAttribute('role') || '',
+                            text: (el.innerText || '').replace(/\\s+/g, ' ')
+                                    .trim().slice(0, 60),
+                        });
+                    };
+                    document.querySelectorAll('[data-testid*="model"],'
+                        + '[data-testid*="effort"], [role="menuitemradio"],'
+                        + '[aria-label^="Model"]').forEach(push);
+                    return out.slice(0, 25);
+                }
+                """, default=None)
+            log.warning("DOM селектора моделей (%s): url=%s, кандидаты=%s",
+                        why, self.page.url, json.dumps(info, ensure_ascii=False))
+        except Exception as e:
+            log.warning("Не смог снять слепок DOM селектора моделей: %s", e)
 
     async def _open_model_menu(self) -> bool:
         """Открыть селектор моделей с ретраями. Возвращает True если меню
@@ -439,9 +679,12 @@ class ClaudeAutomation:
                 # от прошлого попапа и съесть клик по селектору (Playwright
                 # это видит как «<body> intercepts pointer events»).
                 await self._neutralize_overlays()
-                btn = self.page.locator(
-                    '[data-testid="model-selector-dropdown"]'
-                ).first
+                btn = await self._find_model_button()
+                if btn is None:
+                    log.info("_open_model_menu: кнопка селектора не найдена "
+                             "(попытка %d)", attempt + 1)
+                    await asyncio.sleep(1.0)
+                    continue
                 try:
                     await btn.click(timeout=5_000)
                 except Exception as click_err:
@@ -455,7 +698,7 @@ class ClaudeAutomation:
                     except Exception:
                         await btn.evaluate("el => el.click()")
                 await _human_pause(0.5, 0.9)
-                if await self.page.locator('[role="menu"]').count() > 0:
+                if await self._menu_open():
                     return True
             except Exception as e:
                 last_err = e
@@ -464,6 +707,17 @@ class ClaudeAutomation:
                 await asyncio.sleep(1.0)
         log.warning("Не открыл селектор моделей после 4 попыток: %s", last_err)
         return False
+
+    async def _find_model_button(self):
+        """Локатор кнопки-селектора моделей по списку кандидатов, или None."""
+        for sel in self.MODEL_BUTTON_SELECTORS:
+            try:
+                loc = self.page.locator(sel).first
+                if await loc.count() > 0:
+                    return loc
+            except Exception:
+                continue
+        return None
 
     # ------------------------------------------------------------------
     # Low-level helpers
