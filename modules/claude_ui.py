@@ -375,18 +375,36 @@ class ClaudeAutomation:
                     log.info("Пункт Effort отсутствует — видимо Haiku "
                              "(effort не настраивается)")
                     break
+                # Подменю раскрывается по наведению (aria-expanded=true уже
+                # после hover) — это родная для меню интеракция; клик оставляем
+                # запасным путём, он же может подменю и схлопнуть.
                 try:
-                    await trigger.click(timeout=4_000)
-                    await _human_pause(0.5, 1.0)
+                    await trigger.hover(timeout=3_000)
+                    await _human_pause(0.4, 0.8)
                 except Exception as e:
-                    log.info("effort-trigger click (попытка %d) упал: %s",
+                    log.info("effort-trigger hover (попытка %d) упал: %s",
                              attempt + 1, e)
                 opt = await self._find_effort_option(level)
                 if opt is None:
-                    log.warning("Уровень effort '%s' не найден в подменю "
-                                "(возможно, модель его не поддерживает)", level)
-                    await self._dump_model_ui_debug(
-                        f"effort '{level}' не найден в подменю")
+                    try:
+                        await trigger.click(timeout=4_000)
+                        await _human_pause(0.5, 1.0)
+                    except Exception as e:
+                        log.info("effort-trigger click (попытка %d) упал: %s",
+                                 attempt + 1, e)
+                    opt = await self._find_effort_option(level)
+                if opt is None:
+                    # У Haiku подменю уровней нет вообще (единственный режим
+                    # «Extended») — это норма, а не поломка разметки: слепок
+                    # DOM в лог не пишем, иначе он засоряется на каждом прогоне.
+                    cur_lbl = await self._current_model_label() or ""
+                    if "Haiku" in cur_lbl or "Haiku" in (model_name or ""):
+                        log.info("У Haiku effort не настраивается — пропускаю")
+                    else:
+                        log.warning("Уровень effort '%s' не найден в подменю "
+                                    "(возможно, модель его не поддерживает)", level)
+                        await self._dump_model_ui_debug(
+                            f"effort '{level}' не найден в подменю")
                     break
                 already_checked = False
                 try:
@@ -523,10 +541,21 @@ class ClaudeAutomation:
                     if (!out.model)
                         out.model = (el.innerText || '').replace(/\\s+/g, ' ').trim();
                 }
-                const trig = document.querySelector('[data-testid="effort-menu-trigger"]')
+                // Строка «Effort High ›» в меню: с августа 2026 у неё нет
+                // data-testid, поэтому ищем по подписи.
+                let trig = document.querySelector('[data-testid="effort-menu-trigger"]')
                     || document.querySelector('[data-testid*="effort"][aria-haspopup]');
+                if (!trig) {
+                    for (const el of document.querySelectorAll(
+                            '[role="menuitem"][aria-haspopup]')) {
+                        const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+                        if (/^effort\\b/i.test(t)) { trig = el; break; }
+                    }
+                }
                 if (trig && !out.effort)
-                    out.effort = (trig.innerText || '').replace(/\\s+/g, ' ').trim();
+                    out.effort = (trig.innerText || '')
+                        .replace(/[\\uE000-\\uF8FF]/g, ' ')
+                        .replace(/\\s+/g, ' ').replace(/^effort\\s*/i, '').trim();
                 return out;
             }
             """, default=None)
@@ -616,8 +645,12 @@ class ClaudeAutomation:
 
     async def _find_effort_option(self, level: str):
         """Локатор пункта конкретного уровня effort, или None.
-        Сначала по data-testid, потом по точному тексту пункта — иначе
-        подстрочный поиск «High» поймал бы ещё и «Extra High»."""
+
+        В пикере (август 2026) у пунктов НЕТ data-testid, а текст содержит
+        служебные подписи и иконки: «High Default », «Max ».
+        Поэтому сравниваем ПЕРВОЕ слово пункта, выкинув символы иконочного
+        шрифта: точное совпадение по «High» промахивалось мимо «High Default»,
+        а подстрочный поиск поймал бы и чужие пункты."""
         try:
             loc = self.page.locator(f'[data-testid="effort-option-{level}"]').first
             if await loc.count() > 0:
@@ -627,13 +660,36 @@ class ClaudeAutomation:
         label = self._EFFORT_KEY_TO_LABEL.get(level)
         if not label:
             return None
-        for role in ("menuitemradio", "menuitem", "option"):
-            try:
-                loc = self.page.get_by_role(role, name=label, exact=True).first
-                if await loc.count() > 0:
-                    return loc
-            except Exception:
-                continue
+        # raw-строка: обратные слэши в регулярках должны дойти до JS
+        # как есть, а не быть съедены Python-экранированием.
+        script = r"""
+            () => {
+                const want = %s;
+                const clean = (s) => (s || '')
+                    .replace(/[\uE000-\uF8FF]/g, ' ')
+                    .replace(/\s+/g, ' ').trim();
+                document.querySelectorAll('[data-vizo-effort]')
+                    .forEach(el => el.removeAttribute('data-vizo-effort'));
+                const sel = '[role="menuitemradio"], [role="menuitem"], [role="option"]';
+                for (const el of document.querySelectorAll(sel)) {
+                    const t = clean(el.innerText);
+                    if (!t) continue;
+                    if (t.split(' ')[0].toLowerCase() === want.toLowerCase()) {
+                        el.setAttribute('data-vizo-effort', '1');
+                        return true;
+                    }
+                }
+                return false;
+            }
+        """ % json.dumps(label)
+        if not await self._safe_eval(script, default=False):
+            return None
+        loc = self.page.locator('[data-vizo-effort="1"]').first
+        try:
+            if await loc.count() > 0:
+                return loc
+        except Exception:
+            pass
         return None
 
     async def _dump_model_ui_debug(self, why: str):

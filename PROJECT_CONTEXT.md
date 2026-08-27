@@ -74,6 +74,20 @@ automation/
   (`_dump_model_ui_debug`). Раньше любая смена `data-testid`/формата
   aria-label роняла весь сценарий на шаге «новый чат», даже когда нужная
   модель уже была выбрана вручную.
+- **Разметка пикера на 27.08.2026** (снята с живой страницы, `dump_picker`):
+  - кнопка: `[data-testid="model-selector-dropdown"]`,
+    `aria-label="Model: Opus 5 · High"` — разделитель **`·`**, не пробел
+  - модели: `[role="menuitemradio"]` **без** `data-testid`, текст вида
+    `"Opus 5 For complex tasks"` → кликаются по `:has-text("Opus 5")`
+  - effort: строка `[role="menuitem"][aria-haspopup="menu"]` с текстом
+    `"Effort High ›"` — прежнего `effort-menu-trigger` больше НЕТ
+  - уровни: `[role="menuitemradio"]` с текстом `Low` / `Medium` /
+    `High Default` / `Extra` / `Max` — прежних `effort-option-*` больше НЕТ.
+    Ищем по **первому слову** пункта, очищенному от символов иконочного
+    шрифта (U+E000–U+F8FF): точное совпадение по `"High"` промахивалось
+    мимо `"High Default"`, а подстрочный поиск ловил бы чужие пункты
+  - подменю раскрывается **наведением** (`hover`), клик — запасной путь
+  - у Haiku 4.5 подменю уровней нет вообще (единственный режим `Extended`)
 
 ### Озвучка — 4 движка за одним диспетчером
 `modules/voice_api.py::synthesize(text, voice, path)` смотрит на поле `engine`
