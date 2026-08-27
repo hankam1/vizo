@@ -439,6 +439,13 @@ NODE_OUTPUT_TYPE = {
 # (claude_open, gpt_prompt, …) — сессии, валидация и resume-откат ведутся
 # по каждому провайдеру НЕЗАВИСИМО: в смешанном сценарии Claude и ChatGPT
 # открыты одновременно в двух отдельных окнах браузера.
+# Сколько раз повторяем ОДИН промпт Banana, прежде чем признать его неудачным.
+# Бесконечный ретрай (как было) переживал перегрузку VeoNonStop, но при
+# настоящей поломке превращался в вечный спиннер без единого файла и без
+# ошибки. 12 попыток с backoff ≈ 11 минут — реальный сбой сервиса переживает,
+# сломанный запрос не прячет.
+BANANA_MAX_ATTEMPTS = 12
+
 AI_PROVIDERS = ("claude", "gpt")
 AI_PROVIDER_LABEL = {"claude": "Claude", "gpt": "ChatGPT"}
 # Действия, живущие в контексте открытого чата (требуют «{provider}_open»).
@@ -1290,9 +1297,10 @@ class ScenarioRunner:
             def _is_permanent(err: Exception) -> bool:
                 """Google's INVALID_ARGUMENT / safety-filter rejects never
                 succeed on retry — recognising them stops infinite loops.
-                Сюда же ответ без картинок: если сервис сменил формат, вечный
-                ретрай просто крутится час и не даёт ни файлов, ни ошибки."""
-                if isinstance(err, veo_api.BananaNoImages):
+                Сюда же ответ без картинок и проблемы с ключом/кредитами
+                (VeoPermanentError): вечный ретрай на них просто крутится час
+                и не даёт ни файлов, ни ошибки."""
+                if isinstance(err, veo_api.VeoPermanentError):
                     return True
                 msg = str(err)
                 markers = ("INVALID_ARGUMENT", "BAD_REQUEST", "safety",
@@ -1303,6 +1311,11 @@ class ScenarioRunner:
                 # 5, 10, 20, 30, then 60 forever
                 seq = (5, 10, 20, 30)
                 return seq[attempt - 1] if attempt <= len(seq) else 60
+
+            def _short(err: Exception) -> str:
+                """Однострочный текст ошибки для строки прогресса."""
+                msg = " ".join(str(err).split())
+                return msg[:110] + "…" if len(msg) > 110 else msg
 
             async def _sleep_cancellable(sec: int):
                 # Wake up every 0.5s to check for cancellation / skip.
@@ -1369,9 +1382,13 @@ class ScenarioRunner:
                     except (ScenarioCancelled, StepSkipped):
                         raise
                     except Exception as e:
-                        # Permanent rejects (Google safety filter etc.) —
-                        # give up after 2 attempts, no point retrying forever.
-                        if _is_permanent(e) and attempt >= 2:
+                        # Permanent rejects (Google safety filter etc.) — сдаёмся
+                        # после 2 попыток. Транзиентные тоже не крутим вечно:
+                        # если сервис отвечает одинаковой ошибкой десяток раз
+                        # подряд, это уже не «временная перегрузка», а поломка,
+                        # и пользователю нужен её текст, а не вечный спиннер.
+                        if ((_is_permanent(e) and attempt >= 2)
+                                or attempt >= BANANA_MAX_ATTEMPTS):
                             log.error(
                                 "banana_batch: prompt #%d permanently rejected by Google "
                                 "after %d attempts: %s. Prompt: %.500s",
@@ -1382,22 +1399,28 @@ class ScenarioRunner:
                                 failures.append((i, prompt, str(e)))
                                 self.on_progress(
                                     idx, total_steps, step_name,
-                                    f"{done_count}/{total} готово ({fail_count} ошибок)",
+                                    f"{done_count}/{total} готово "
+                                    f"({fail_count} ошибок) — " + _short(e),
                                 )
                             return
-                        # Transient (500, network, timeout) — retry forever
-                        # with backoff. Cancellation breaks out of sleep.
+                        # Transient (500, network, timeout) — retry with
+                        # backoff. Cancellation breaks out of sleep.
                         wait = _backoff(attempt)
                         log.warning(
                             "banana_batch: prompt #%d failed (attempt %d): %s — retry in %ds. Prompt: %.200s",
                             i, attempt, e, wait, prompt,
                         )
                         async with done_lock:
+                            # Текст ошибки — прямо в строку прогресса: без него
+                            # шаг выглядел как «крутится и молчит», и причину
+                            # приходилось искать в логе.
                             self.on_progress(
                                 idx, total_steps, step_name,
                                 f"{done_count}/{total} готово"
                                 + (f" ({fail_count} ошибок)" if fail_count else "")
-                                + f" • промпт #{i}: попытка {attempt}, ждём {wait}с…",
+                                + f" • промпт #{i}: попытка {attempt}/"
+                                  f"{BANANA_MAX_ATTEMPTS}, ждём {wait}с — "
+                                + _short(e),
                             )
                         await _sleep_cancellable(wait)
 

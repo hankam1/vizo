@@ -40,21 +40,41 @@ IMAGE_TIMEOUT_SEC = 1800
 MAX_POLL_FAILURES = 20
 
 
-class BananaNoImages(Exception):
-    """Задача Banana завершилась, но картинок в ответе нет.
+class VeoPermanentError(Exception):
+    """Сбой, который повтором не лечится. Оба места, решающие «повторять или
+    нет» (veo_api.banana_generate_with_retry и шаг banana_batch), смотрят на
+    тип исключения — без этого такие ошибки уходили в бесконечный ретрай и
+    выглядели как «крутится и молчит»."""
 
-    Отдельный класс, а не просто текст: ретраить такое бессмысленно (обычно
-    это значит, что сервис снова сменил формат ответа), а молча считать
-    промпт готовым — тем более. Оба места, решающие «повторять или нет»,
-    смотрят на тип исключения.
-    """
+
+class VeoAuthError(VeoPermanentError):
+    """Нет ключа, ключ неверен или на счету кончились кредиты (401/402/403)."""
+
+
+class BananaNoImages(VeoPermanentError):
+    """Задача Banana завершилась, но картинок в ответе нет — обычно это
+    значит, что сервис снова сменил формат ответа."""
 
 
 def _headers() -> dict:
     key = settings.load().get("veo_api_key", "")
     if not key:
-        raise RuntimeError("VeoNonStop API ключ не указан в настройках")
+        # Именно VeoAuthError, а не общий RuntimeError: пустой ключ падает
+        # мгновенно и одинаково на каждом промпте, и вечный ретрай такого
+        # давал ровно ту картину «0/10 готово, попытка 10» без причины.
+        raise VeoAuthError(
+            "VeoNonStop API ключ не указан в настройках "
+            "(Настройки → ключ VeoNonStop)"
+        )
     return {"X-API-Key": key, "Content-Type": "application/json"}
+
+
+def _raise_for_auth(status: int, body: str, label: str) -> None:
+    """401/402/403 — повтор бесполезен, нужен ключ или пополнение счёта."""
+    if status in (401, 402, 403):
+        hint = {401: "ключ не принят", 402: "закончились кредиты",
+                403: "доступ запрещён"}[status]
+        raise VeoAuthError(f"{label} {status}: {hint}. {body[:200]}")
 
 
 def _check(data: dict, label: str) -> dict:
@@ -153,11 +173,14 @@ async def _await_banana_task(
                     headers=_headers(),
                 ) as r:
                     text = await r.text()
+                    _raise_for_auth(r.status, text, "video/status")
                     if r.status >= 400:
                         raise Exception(f"video/status {r.status}: {text[:300]}")
                     data = _check(_json.loads(text), "video/status")
                 poll_failures = 0
             except asyncio.CancelledError:
+                raise
+            except VeoPermanentError:
                 raise
             except Exception:
                 poll_failures += 1
@@ -223,6 +246,7 @@ async def _banana_post(
         headers=_headers(),
     ) as r:
         text = await r.text()
+        _raise_for_auth(r.status, text, "banana/generate")
         if r.status >= 400:
             raise Exception(f"banana/generate {r.status}: {text[:300]}")
         data = _check(_json.loads(text), "banana/generate")
@@ -372,7 +396,7 @@ _PERMANENT_MARKERS = (
 
 
 def _is_permanent_error(err: Exception) -> bool:
-    if isinstance(err, BananaNoImages):
+    if isinstance(err, VeoPermanentError):
         return True
     msg = str(err)
     return any(m in msg for m in _PERMANENT_MARKERS)
